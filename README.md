@@ -8,7 +8,9 @@ KOSPI·KOSDAQ 상장기업의 매출액 / 영업이익 / 당기순이익을 Open
 
 **웹 배포** (Docker): 이 폴더를 GitHub에 올리고 Render / Fly.io / Railway 등에서 Docker 서비스로 생성하면 됩니다
 (`render.yaml`, `Dockerfile` 포함). 환경변수:
-- `DATA_SOURCE=web` (기본) 공시원문 스크래핑 / `api` OpenDART API(키 `DART_API_KEY` 필요)
+- `DATA_SOURCE` — `api` OpenDART 공식 API(키 `DART_API_KEY` 필요) / `web` 공시원문 스크래핑
+  - **클라우드(데이터센터 IP) 배포에서는 반드시 `api`를 사용하세요.** KRX·DART 웹페이지는 서버 IP의 자동 요청을 봇으로 보고 `HTTP 403`으로 차단하므로 `web` 모드는 종목 검색부터 실패합니다. 로컬 PC 실행은 `web`도 동작합니다. `render.yaml` 기본값은 `api`입니다.
+- `DART_API_KEY` — OpenDART 인증키 40자리. https://opendart.fss.or.kr 에서 무료 발급(가입 → 인증키 신청). `api` 모드 필수.
 - `APP_PASSWORD` 설정 시 접속 비밀번호(아이디는 아무 값) — **공개 배포 시 반드시 설정하세요**
 - `HOST`, `PORT` 는 호스팅 환경에 맞게 자동/수동 지정
 
