@@ -3,7 +3,8 @@
 import os, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import dart_web as W
-from engine import find_item, CompanyRun
+from engine import (find_item, CompanyRun, resolve_ni_order, ni_fallback_reason,
+                    NI_FALLBACK_ORDERS)
 from test_scenarios import Fake, REPORTS, TODAY
 
 HEAD = ("<p>연결 포괄손익계산서</p><p>제 29 기 반기 2026.01.01 부터 2026.06.30 까지</p><p>(단위 : 원)</p>"
@@ -91,6 +92,36 @@ class N(unittest.TestCase):
         rows = rows_of(TIER1)
         self.assertEqual(find_item(rows, "net_income", "CFS", tier=2)["cur"], 80)
         self.assertEqual(find_item(rows, "net_income", "CFS", tier=3)["cur"], 75)
+
+    # ---- 사용자 설정: 대체 추출 순서 ----------------------------------------
+    def test_fallback_order_option_swaps_tier2_and_tier3(self):
+        rows = rows_of(HANTEC)                                   # 1순위 없음, 2·3순위 모두 존재
+        default = find_item(rows, "net_income", "CFS", order=resolve_ni_order("ni_total"))
+        self.assertEqual(default["tier"], 2)                     # 기본: 연결 당기순이익 전체
+        self.assertEqual(default["account_nm"], "반기순이익")
+        ci_first = find_item(rows, "net_income", "CFS", order=resolve_ni_order("ci_parent"))
+        self.assertEqual(ci_first["tier"], 3)                    # 설정 변경: 총포괄이익(지배주주) 우선
+        self.assertIn("총포괄이익", ci_first["account_nm"])
+
+    def test_tier1_still_wins_regardless_of_fallback_order(self):
+        rows = rows_of(TIER1)
+        for code in NI_FALLBACK_ORDERS:
+            self.assertEqual(find_item(rows, "net_income", "CFS", order=resolve_ni_order(code))["tier"], 1)
+
+    def test_resolve_ni_order_defaults_on_bad_input(self):
+        self.assertEqual(resolve_ni_order("ci_parent"), (1, 3, 2))
+        self.assertEqual(resolve_ni_order("garbage"), (1, 2, 3))
+        self.assertEqual(resolve_ni_order(None), (1, 2, 3))
+
+    def test_fallback_reason_matches_chosen_order(self):
+        # 기본 순서에서 tier 3 사유는 1·2순위 부재를 언급
+        self.assertIn("연결 당기순이익 전체", ni_fallback_reason((1, 2, 3), 3))
+        # 역순에서 tier 3 사유는 1순위 부재만(2순위는 더 낮은 우선순위) 언급
+        r = ni_fallback_reason((1, 3, 2), 3)
+        self.assertNotIn("연결 당기순이익 전체", r)
+        self.assertIn("총포괄이익", r)
+        # 1순위를 그대로 쓴 경우 사유 없음
+        self.assertIsNone(ni_fallback_reason((1, 2, 3), 1))
 
     # ---- 엔진 전체: 대체기준 표시와 동일 기준 차감
     @staticmethod

@@ -75,17 +75,47 @@ CI_PARENT_IDS = {"ifrs-full_ComprehensiveIncomeAttributableToOwnersOfParent",
                  "ifrs_ComprehensiveIncomeAttributableToOwnersOfParent"}
 NI_WORD = re.compile(r"순이익|순손익|순손실")
 
-# 연결 당기순이익 추출 순서: 1 → 2 → 3
+# 연결 당기순이익 후보(단계). 번호는 의미 식별자이며 추출 '우선순위'는 아래 NI_FALLBACK_ORDERS 로 정한다.
+#   1: 지배기업 소유주 귀속 당기순이익 (항상 1순위)
+#   2: 연결 당기순이익 전체
+#   3: 지배기업 소유주 귀속 총포괄이익
+NI_TIER_NAME = {
+    1: "지배기업 소유주 귀속 당기순이익",
+    2: "연결 당기순이익 전체",
+    3: "지배기업 소유주 귀속 총포괄이익",
+}
 NI_TIER_LABEL = {
     1: "지배기업 소유주 귀속 당기순이익",
     2: "연결 당기순이익 전체 (대체)",
     3: "지배기업 소유주 귀속 총포괄이익 (대체)",
 }
-NI_TIER_REASON = {
-    2: "연결 손익계산서에 지배기업 소유주 귀속 당기순이익 항목이 없어 연결 당기순이익 전체로 대체",
-    3: "연결 손익계산서에 지배기업 소유주 귀속 당기순이익·연결 당기순이익 전체 항목이 없어 지배기업 소유주 귀속 총포괄이익으로 대체",
+
+# 1순위(지배주주 순이익) 부재 시 대체 추출 순서. 사용자가 검색 시작 화면에서 고를 수 있다.
+NI_FALLBACK_ORDERS = {
+    "ni_total": (1, 2, 3),    # 기본: 연결 당기순이익 전체 → 지배주주 총포괄이익
+    "ci_parent": (1, 3, 2),   # 지배주주 총포괄이익 → 연결 당기순이익 전체
 }
-NI_ORDER_TEXT = "지배기업 소유주 귀속 당기순이익 → 연결 당기순이익 전체 → 지배기업 소유주 귀속 총포괄이익"
+DEFAULT_NI_ORDER = "ni_total"
+
+
+def resolve_ni_order(code):
+    """옵션 코드(또는 tier 튜플)를 추출 순서 튜플로 정규화. 1순위는 항상 지배주주 순이익."""
+    if isinstance(code, (tuple, list)) and tuple(code) in NI_FALLBACK_ORDERS.values():
+        return tuple(code)
+    return NI_FALLBACK_ORDERS.get(code, NI_FALLBACK_ORDERS[DEFAULT_NI_ORDER])
+
+
+def ni_order_text(order):
+    return " → ".join(NI_TIER_NAME[t] for t in order)
+
+
+def ni_fallback_reason(order, tier):
+    """대체 항목을 쓴 사유 문장. 1순위를 그대로 쓴 경우에는 사유 없음(None)."""
+    if not tier or tier == order[0]:
+        return None
+    preceding = order[:order.index(tier)]
+    return (f"연결 손익계산서에 {'·'.join(NI_TIER_NAME[t] for t in preceding)} 항목이 없어 "
+            f"{NI_TIER_NAME[tier]}으로 대체")
 
 
 def _match(rows, item, fs):
@@ -151,13 +181,14 @@ def _fig(hit, sj, tier=None):
     }
 
 
-def find_item(rows, item, fs, tier=None):
-    """tier: 연결 당기순이익에서 특정 단계만 요청할 때(누적 차감 시 동일 기준 유지용)."""
+def find_item(rows, item, fs, tier=None, order=(1, 2, 3)):
+    """tier: 연결 당기순이익에서 특정 단계만 요청할 때(누적 차감 시 동일 기준 유지용).
+    order: 1순위 부재 시 대체 후보를 시도할 순서."""
     sjs = [(sj, [r for r in rows if r.get("sj_div") == sj]) for sj in ("IS", "CIS")]
     sjs = [(sj, sr) for sj, sr in sjs if sr]
     if item == "net_income" and fs == "CFS":
         cands = {sj: _ni_cfs_candidates(sr) for sj, sr in sjs}
-        for t in ((tier,) if tier else (1, 2, 3)):
+        for t in ((tier,) if tier else order):
             for sj, _ in sjs:
                 if cands[sj].get(t):
                     return _fig(cands[sj][t], sj, t)
@@ -254,8 +285,9 @@ def qlabel(y, q):
 # 회사 단위 실행
 # --------------------------------------------------------------------------- #
 class CompanyRun:
-    def __init__(self, client, company, today):
+    def __init__(self, client, company, today, ni_order=DEFAULT_NI_ORDER):
         self.client, self.company, self.today = client, company, today
+        self.ni_order = resolve_ni_order(ni_order)   # 연결 당기순이익 대체 추출 순서
         self.cc = company["corp_code"]
         self._stmt, self._basis, self._err = {}, {}, {}
         info = client.company(self.cc) or {}
@@ -279,14 +311,14 @@ class CompanyRun:
 
     def fig(self, rep, fs, item, tier=None):
         rows = self.stmt(rep, fs)
-        return find_item(rows, item, fs, tier) if rows else None
+        return find_item(rows, item, fs, tier, self.ni_order) if rows else None
 
-    @staticmethod
-    def ni_info(fs, tier):
+    def ni_info(self, fs, tier):
         """당기순이익 추출 기준 표시: (라벨, 대체기준 여부, 사유)"""
         if fs != "CFS":
             return "개별 당기순이익", False, None
-        return NI_TIER_LABEL.get(tier, ""), bool(tier and tier > 1), NI_TIER_REASON.get(tier)
+        return (NI_TIER_LABEL.get(tier, ""), bool(tier and tier != self.ni_order[0]),
+                ni_fallback_reason(self.ni_order, tier))
 
     def basis(self, rep):
         """해당 보고서(기간)의 연결/개별 판정. API 조회 실패만으로 '연결 미작성' 단정 금지."""
@@ -567,12 +599,12 @@ class CompanyRun:
 
     def ni_fallback_notes(self, quarters):
         out = []
-        for tier in (2, 3):
+        for tier in self.ni_order[1:]:
             qs = [q["label"] for q in quarters
                   if q["items"]["net_income"].get("tier") == tier and q["items"]["net_income"].get("fallback")]
             if qs:
-                out.append(f"당기순이익 대체기준: {', '.join(qs)} — {NI_TIER_REASON[tier]}함. "
-                           f"(연결 당기순이익 추출 순서: {NI_ORDER_TEXT})")
+                out.append(f"당기순이익 대체기준: {', '.join(qs)} — {ni_fallback_reason(self.ni_order, tier)}함. "
+                           f"(연결 당기순이익 추출 순서: {ni_order_text(self.ni_order)})")
         return out
 
     # -- 전체 ----------------------------------------------------------------

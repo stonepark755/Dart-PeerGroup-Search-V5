@@ -16,7 +16,7 @@ import base64
 
 from dart import DartClient, DartError, Store
 from dart_web import WebClient
-from engine import CompanyRun, ITEMS, PERIOD_CODES
+from engine import CompanyRun, ITEMS, PERIOD_CODES, NI_FALLBACK_ORDERS, DEFAULT_NI_ORDER
 from xlsx import build_workbook
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -90,13 +90,14 @@ def norm_base_year(v):
     return y if 2000 <= y <= this else this
 
 
-def run_one(item, searched_at, base_year):
+def run_one(item, searched_at, base_year, ni_order=DEFAULT_NI_ORDER):
     company = {k: item.get(k) for k in ("corp_code", "corp_name", "stock_code", "market")}
     req = item.get("periods") or {}
     periods = {i: (req.get(i) if req.get(i) in PERIOD_CODES else "FY") for i in ITEMS}
     try:
-        res = CompanyRun(CLIENT, company, date.today()).run(periods, base_year)
+        res = CompanyRun(CLIENT, company, date.today(), ni_order).run(periods, base_year)
         res["periods"] = periods
+        res["ni_order"] = ni_order
         if res.get("has_ttm"):
             # 구간이 여러 개면 분기는 중복 없이, 합계는 구간별로 저장
             seen, qs, ttm_rows = set(), [], []
@@ -122,8 +123,12 @@ def run_query(payload):
     searched_at = datetime.now().isoformat(timespec="seconds")
     items = payload.get("items") or []
     base_year = norm_base_year(payload.get("base_year"))
-    results = list(POOL.map(lambda it: run_one(it, searched_at, base_year), items))   # 추가한 순서 유지
-    return {"searched_at": searched_at, "unit": "원", "base_year": base_year, "results": results}
+    ni_order = payload.get("ni_order")
+    if ni_order not in NI_FALLBACK_ORDERS:
+        ni_order = DEFAULT_NI_ORDER
+    results = list(POOL.map(lambda it: run_one(it, searched_at, base_year, ni_order), items))   # 추가한 순서 유지
+    return {"searched_at": searched_at, "unit": "원", "base_year": base_year,
+            "ni_order": ni_order, "results": results}
 
 
 # ------------------------------------------------------------------ HTTP
