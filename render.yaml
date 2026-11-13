@@ -2,7 +2,7 @@ services:
   - type: web
     name: dart-agent
     runtime: docker
-    plan: starter
+    plan: free
     envVars:
       - key: DATA_SOURCE
         value: web
