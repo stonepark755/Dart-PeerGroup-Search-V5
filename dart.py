@@ -20,6 +20,19 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
+from datetime import datetime, timedelta, timezone
+
+# 한국시간(KST, UTC+9). 서버가 해외 리전(UTC)에서 돌아도 검색일·검색시점은 한국 기준.
+# slim 이미지엔 tzdata 가 없을 수 있어 ZoneInfo 대신 고정 오프셋 사용(한국은 서머타임 없음).
+KST = timezone(timedelta(hours=9), "KST")
+
+
+def now_kst():
+    return datetime.now(KST)
+
+
+def today_kst():
+    return now_kst().date()
 
 BASE = "https://opendart.fss.or.kr/api/"
 DAY = 86400

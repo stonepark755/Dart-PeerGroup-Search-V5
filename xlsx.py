@@ -130,7 +130,7 @@ def build_workbook(payload):
     results = payload.get("results") or []
     s1 = Sheet("재무실적 결과", [16, 10, 9, 18, 18, 22, 12, 18, 22, 12, 18, 22, 12, 60])
     s1.add([("재무실적 조회 결과", S_B)])
-    s1.add([f"검색 시점 {str(payload.get('searched_at', '')).replace('T', ' ')}", f"단위: {payload.get('unit', '원')}"]
+    s1.add([f"검색 시점 {str(payload.get('searched_at', '')).replace('T', ' ')} (한국시간)", f"단위: {payload.get('unit', '원')}"]
            + ([f"기준연도(금년): {payload['base_year']}년"] if payload.get("base_year") else []))
     s1.add([])
     head = [("종목명", S_B), ("종목코드", S_B), ("시장", S_B), ("재무구분", S_B)]

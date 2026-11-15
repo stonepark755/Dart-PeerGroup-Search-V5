@@ -183,9 +183,9 @@ const ITEMS=[["revenue","매출액"],["operating_income","영업이익"],["net_i
 /* 4개 분기 합산 구간은 검색 기준연도(금년)로 고정 — 종목별 최신 공시 시점과 무관하게 같은 구간을 합산 */
 const WINDOWS=[["TTM_Q1","4개분기(작년 2Q~금년 1Q)",1],["TTM_Q2","4개분기(작년 3Q~금년 2Q)",2],["TTM_Q3","4개분기(작년 4Q~금년 3Q)",3]];
 const PERIOD=[["FY","최근 사업연도"],...WINDOWS.map(([v,l])=>[v,l])];
-const THIS_YEAR=new Date().getFullYear();
+/* 한국시간 기준 연도(브라우저 시간대와 무관) */
+const THIS_YEAR=+new Intl.DateTimeFormat("en",{timeZone:"Asia/Seoul",year:"numeric"}).format(new Date());
 const state={selected:[],data:null,baseYear:THIS_YEAR,niOrder:"ni_total"};
-const isTTM=v=>v==="TTM"||WINDOWS.some(w=>w[0]===v);
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmt=n=>n==null?"":BigInt(n).toLocaleString("ko-KR");
@@ -291,9 +291,11 @@ $("#export").onclick=async()=>{
   try{
     const r=await fetch("/api/export",{method:"POST",body:JSON.stringify(state.data)});
     if(!r.ok)throw new Error("내보내기 실패 ("+r.status+")");
-    const blob=await r.blob(),a=document.createElement("a"),t=new Date(),p=n=>String(n).padStart(2,"0");
+    const blob=await r.blob(),a=document.createElement("a");
     a.href=URL.createObjectURL(blob);
-    a.download=`DART_재무실적_${t.getFullYear()}${p(t.getMonth()+1)}${p(t.getDate())}_${p(t.getHours())}${p(t.getMinutes())}.xlsx`;
+    /* 파일명도 서버의 검색 시점(한국시간) 사용: 2026-11-16T08:05:12 → 20261116_0805 */
+    const ts=state.data.searched_at.replace(/[-:]/g,"").replace("T","_").slice(0,13);
+    a.download=`DART_재무실적_${ts}.xlsx`;
     document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),2000);
     st.textContent="다운로드했습니다. (시트: 재무실적 결과 / 분기별 상세 / 계산과정)";
   }catch(e){st.textContent=e.message}
@@ -318,7 +320,7 @@ function cell(r){
 }
 function renderResults(){
   const d=state.data;
-  $("#resmeta").textContent=`검색 시점 ${d.searched_at.replace("T"," ")} · 기준연도(금년) ${d.base_year??""}년 · 단위 ${d.unit} · 조회 실패 항목은 0이 아니라 오류 상태로 표시됩니다.`;
+  $("#resmeta").textContent=`검색 시점 ${d.searched_at.replace("T"," ")} (한국시간) · 기준연도(금년) ${d.base_year??""}년 · 단위 ${d.unit} · 조회 실패 항목은 0이 아니라 오류 상태로 표시됩니다.`;
   $("#resbody").innerHTML=d.results.map((r,i)=>{
     if(r.error)return `<tr><td><strong>${esc(r.corp_name)}</strong></td><td>${esc(r.stock_code)}</td><td colspan="5" class="errcell">조회 실패<small style="max-width:none">${esc(r.error)}</small></td></tr>`;
     const bd=r.basis_display?basisTag(r.basis_display):"";

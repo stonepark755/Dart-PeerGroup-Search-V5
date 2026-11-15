@@ -8,7 +8,6 @@ import mimetypes
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -16,6 +15,7 @@ import base64
 
 from dart import DartClient, DartError, Store
 from dart_web import WebClient
+from dart import now_kst, today_kst
 from engine import CompanyRun, ITEMS, PERIOD_CODES, NI_FALLBACK_ORDERS, DEFAULT_NI_ORDER
 from xlsx import build_workbook
 
@@ -82,7 +82,7 @@ def search_corp(q):
 # ------------------------------------------------------------------ 조회 실행
 def norm_base_year(v):
     """기준연도(=금년). 미지정·이상값이면 검색일의 연도."""
-    this = date.today().year
+    this = today_kst().year
     try:
         y = int(v)
     except (TypeError, ValueError):
@@ -95,7 +95,7 @@ def run_one(item, searched_at, base_year, ni_order=DEFAULT_NI_ORDER):
     req = item.get("periods") or {}
     periods = {i: (req.get(i) if req.get(i) in PERIOD_CODES else "FY") for i in ITEMS}
     try:
-        res = CompanyRun(CLIENT, company, date.today(), ni_order).run(periods, base_year)
+        res = CompanyRun(CLIENT, company, today_kst(), ni_order).run(periods, base_year)
         res["periods"] = periods
         res["ni_order"] = ni_order
         if res.get("has_ttm"):
@@ -120,7 +120,7 @@ def run_one(item, searched_at, base_year, ni_order=DEFAULT_NI_ORDER):
 
 
 def run_query(payload):
-    searched_at = datetime.now().isoformat(timespec="seconds")
+    searched_at = now_kst().strftime("%Y-%m-%dT%H:%M:%S")   # 한국시간(오프셋 표기 없이 저장·표시)
     items = payload.get("items") or []
     base_year = norm_base_year(payload.get("base_year"))
     ni_order = payload.get("ni_order")

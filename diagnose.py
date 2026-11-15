@@ -1,8 +1,7 @@
 """실제 DART/KIND 사이트 대비 단계별 점검.  사용법: python diagnose.py 005930
 각 단계가 실패하면 dart_web.py 의 해당 파서를 수정하면 됩니다."""
 import os, sys
-from datetime import date
-from dart import Store
+from dart import Store, today_kst
 from dart_web import WebClient
 from engine import build_reports
 
@@ -15,7 +14,7 @@ def step(n, f):
         print(f"[FAIL] {n}: {e}"); sys.exit(1)
 corps = step("1. KRX 상장법인 목록", c.corp_list); print("   종목 수:", len(corps))
 info = step("2. 종목/결산월", lambda: c._entry(code)); print("  ", info)
-today = date.today()
+today = today_kst()
 rows = step("3. DART 공시검색(정기보고서 목록)", lambda: c.list_periodic(code, f"{today.year-5}{today:%m%d}", f"{today:%Y%m%d}"))
 reps = build_reports(rows, int(info["acc_mt"])); print("   보고서 수:", len(rows), "/ 기간 인식:", len(reps))
 latest = reps[max(reps)]; print("   최신:", latest.report_nm, latest.rcept_no)
