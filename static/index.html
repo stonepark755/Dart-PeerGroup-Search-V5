@@ -105,7 +105,7 @@ summary{cursor:pointer;padding:8px 12px;font-weight:600;font-size:14px}
 .modal-head h3{margin:0;font-size:17px}
 .modal .x{border:0;background:transparent;font-size:16px;padding:4px 8px;line-height:1}
 .modal-actions{display:flex;gap:12px;align-items:center;margin-top:14px;flex-wrap:wrap}
-textarea.excelcol{width:100%;resize:vertical;border:1px solid var(--line);border-radius:5px;padding:5px 10px;line-height:28px;background-color:var(--surface);background-image:repeating-linear-gradient(var(--surface),var(--surface) 27px,var(--line) 27px,var(--line) 28px)}
+textarea.excelcol{width:100%;resize:vertical;border:1px solid var(--line);border-radius:5px;padding:0 10px;line-height:28px;background-color:var(--surface);background-origin:content-box;background-attachment:local;background-image:repeating-linear-gradient(to bottom,transparent 0,transparent 27px,var(--line) 27px,var(--line) 28px)}
 .paste-results{margin-top:16px;max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:6px}
 .pres-sum{padding:8px 12px;border-bottom:1px solid var(--line);font-size:13px;color:var(--muted);background:var(--bg)}
 .pres-row{display:flex;gap:10px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line)}
@@ -216,8 +216,8 @@ textarea.excelcol{width:100%;resize:vertical;border:1px solid var(--line);border
       <h3 id="pasteTitle">기업명 붙여넣기</h3>
       <button type="button" class="x" id="pasteClose" aria-label="닫기">✕</button>
     </div>
-    <p class="hint">엑셀에서 종목명이 세로로 나열된 <strong>한 열</strong>을 복사해 아래 칸에 그대로 붙여넣으세요. (한 줄에 한 종목) 상장 종목명과 정확히 일치하지 않아도 가장 비슷한 종목을 찾아 줍니다.</p>
-    <textarea id="pasteArea" class="excelcol" rows="12" placeholder="삼성전자&#10;SK하이닉스&#10;현대자동차&#10;..." aria-label="종목명 목록"></textarea>
+    <p class="hint">엑셀에서 종목명이 세로로 나열된 <strong>한 열</strong>을 복사해 붙여넣거나, <strong>쉼표(,)로 구분</strong>해 입력하세요. (한 줄에 하나 또는 <code>삼성전자, SK하이닉스, LG에너지솔루션</code> 형식 모두 가능) 상장 종목명과 정확히 일치하지 않아도 가장 비슷한 종목을 찾아 줍니다.</p>
+    <textarea id="pasteArea" class="excelcol" rows="12" placeholder="삼성전자&#10;SK하이닉스&#10;현대자동차&#10;또는: 삼성전자, SK하이닉스, LG에너지솔루션" aria-label="종목명 목록"></textarea>
     <div class="modal-actions">
       <button type="button" class="primary" id="pasteResolve">종목 찾기</button>
       <button type="button" id="pasteCancel">취소</button>
@@ -347,7 +347,7 @@ document.querySelectorAll("[data-bulk]").forEach(el=>{
   const tagFor=s=>s==="ok"?'<span class="tag cfs">일치</span>':s==="approx"?'<span class="tag warn">유사</span>':'<span class="tag miss">없음</span>';
 
   $("#pasteResolve").onclick=async()=>{
-    let names=area.value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+    let names=area.value.split(/[\r\n,，、]+/).map(s=>s.trim()).filter(Boolean);
     if(!names.length){st.textContent="붙여넣은 종목명이 없습니다.";return}
     let note="";
     if(names.length>300){names=names.slice(0,300);note=" (최대 300개까지만 처리)"}
