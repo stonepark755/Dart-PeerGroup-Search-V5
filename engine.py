@@ -240,6 +240,8 @@ def quarter_end(bsns, q, fye):
 
 REPORT_RE = re.compile(r"(사업보고서|반기보고서|분기보고서)\s*\(\s*(\d{4})\.(\d{1,2})\s*\)")
 TYPE_Q = {"사업보고서": (4,), "반기보고서": (2,), "분기보고서": (1, 3)}
+# [첨부정정]·[첨부추가]는 감사보고서 등 첨부서류만 바꾼 공시 — 본문 재무제표는 원본/기재정정본과 같거나 아예 없다.
+ATTACH_ONLY_RE = re.compile(r"\[\s*첨부\s*(정정|추가)\s*\]")
 
 
 class Report:
@@ -249,11 +251,12 @@ class Report:
     def public(self):
         return {"report_nm": self.report_nm, "rcept_no": self.rcept_no, "rcept_dt": self.rcept_dt,
                 "period_end": self.end.isoformat(), "corrected": self.corrected,
+                "replaced": self.replaced, "found_via": getattr(self, "found_via", None),
                 "url": DART_VIEW + self.rcept_no}
 
 
 def build_reports(rows, fye):
-    best = {}
+    cands = {}
     for r in rows:
         m = REPORT_RE.search(r.get("report_nm") or "")
         if not m:
@@ -266,10 +269,16 @@ def build_reports(rows, fye):
         rep = Report(report_nm=r["report_nm"].strip(), rcept_no=r["rcept_no"],
                      rcept_dt=r.get("rcept_dt"), bsns=bsns, q=q, end=end,
                      start=(shift_month_end(end, -12) if q == 4 else shift_month_end(end, -3)) + timedelta(days=1),
-                     corrected="정정" in r["report_nm"])
-        k = (bsns, q)
-        if k not in best or rep.rcept_no > best[k].rcept_no:   # 정정공시가 있으면 최신 접수본 사용
-            best[k] = rep
+                     corrected="정정" in r["report_nm"],
+                     attach_only=bool(ATTACH_ONLY_RE.search(r["report_nm"])), alternates=[], replaced=None,
+                     found_via=r.get("found_via"))
+        cands.setdefault((bsns, q), {})[rep.rcept_no] = rep
+    best = {}
+    for k, reps in cands.items():
+        # 본문이 있는 접수본(원본·기재정정) 중 최신 → 그다음 첨부정정/첨부추가.  나머지는 읽기 실패 시 대체 후보
+        ranked = sorted(reps.values(), key=lambda x: (not x.attach_only, x.rcept_no), reverse=True)
+        ranked[0].alternates = ranked[1:]
+        best[k] = ranked[0]
     return best
 
 
@@ -289,7 +298,7 @@ class CompanyRun:
         self.client, self.company, self.today = client, company, today
         self.ni_order = resolve_ni_order(ni_order)   # 연결 당기순이익 대체 추출 순서
         self.cc = company["corp_code"]
-        self._stmt, self._basis, self._err = {}, {}, {}
+        self._stmt, self._basis, self._err, self._errs = {}, {}, {}, {}
         info = client.company(self.cc) or {}
         try:
             self.fye = int(info.get("acc_mt") or 12)
@@ -302,12 +311,30 @@ class CompanyRun:
     def stmt(self, rep, fs):
         k = (rep.bsns, rep.q, fs)
         if k not in self._stmt:
-            try:
-                self._stmt[k] = self.client.statement(self.cc, rep.bsns, REPRT[rep.q], fs, rcept_no=rep.rcept_no)
-            except DocParseError as ex:          # 이 보고서만 검증 필요로 처리하고 계속 진행
-                self._stmt[k] = None
-                self._err[(rep.bsns, rep.q)] = str(ex)
+            while True:
+                try:
+                    self._stmt[k] = self.client.statement(self.cc, rep.bsns, REPRT[rep.q], fs, rcept_no=rep.rcept_no)
+                    break
+                except DocParseError as ex:
+                    errs = self._errs.setdefault((rep.bsns, rep.q), [])
+                    if str(ex) not in errs:      # 접수본별 실패 사유를 모두 남김(CFS·OFS 재시도 시 중복 제외)
+                        errs.append(str(ex))
+                    if not rep.alternates:       # 대체 접수본도 없으면 이 보고서만 검증 필요로 처리하고 계속 진행
+                        self._stmt[k] = None
+                        self._err[(rep.bsns, rep.q)] = " / ".join(errs)
+                        break
+                    self._use_alternate(rep)
         return self._stmt[k]
+
+    def _use_alternate(self, rep):
+        """같은 기간의 다음 접수본으로 교체(rep 객체를 제자리에서 갱신 — 이미 rep 를 들고 있는 호출부도 일관되게)."""
+        alt = rep.alternates[0]
+        rep.replaced = rep.replaced or rep.report_nm + f" (접수번호 {rep.rcept_no})"
+        rep.report_nm, rep.rcept_no, rep.rcept_dt = alt.report_nm, alt.rcept_no, alt.rcept_dt
+        rep.corrected, rep.attach_only, rep.alternates = alt.corrected, alt.attach_only, rep.alternates[1:]
+        for key in [x for x in self._stmt if x[:2] == (rep.bsns, rep.q)]:
+            del self._stmt[key]                  # 교체 전 접수본 기준 캐시 폐기
+        self._basis.pop((rep.bsns, rep.q), None)
 
     def fig(self, rep, fs, item, tier=None):
         rows = self.stmt(rep, fs)
@@ -325,8 +352,11 @@ class CompanyRun:
         k = (rep.bsns, rep.q)
         if k in self._basis:
             return self._basis[k]
-        if self.stmt(rep, "CFS"):
-            r = {"fs": "CFS", "evidence": "연결재무제표 조회됨(OpenDART CFS)", "message": None}
+        cfs = self.stmt(rep, "CFS")
+        if cfs:
+            ev = ("OpenDART 재무정보 API 미제공 → 공시원문에서 연결 손익계산서 직접 추출"
+                  if cfs[0].get("origin") == "document" else "연결재무제표 조회됨(OpenDART CFS)")
+            r = {"fs": "CFS", "evidence": ev, "message": None}
         elif not self.stmt(rep, "OFS"):
             r = {"fs": None, "evidence": None,
                  "message": "연결·별도 재무제표를 모두 읽지 못함 — 공시원문 확인 필요"
@@ -538,12 +568,31 @@ class CompanyRun:
                 if not f or f["cur"] is None:
                     r = self._fail("unverified", f"{ITEM_KO[item]} 계정을 찾지 못함 — 원문 확인 필요")
                 else:
-                    r = self._ok(f["cur"], "direct", [self._src(rep, b["fs"], f, "연간", f["cur"])])
+                    r = self._ok(f["cur"], "direct", [self._src(rep, b["fs"], f, "연간", f["cur"])],
+                                 note=" ".join(self.replacement_notes([rep]) + self.origin_notes([rep])) or None)
                     if item == "net_income":
                         label, fb, why = self.ni_info(b["fs"], f.get("tier"))
                         r.update(ni_basis=label, fallback=fb, fallback_reason=why, tier=f.get("tier"))
             res[item] = r
         return {"rep": rep, "basis": b}, res
+
+    def origin_notes(self, reps=None):
+        """재무정보 API에 수치가 없어 공시원문에서 직접 추출한 보고서 내역."""
+        reps = reps if reps is not None else sorted(self.reports.values(), key=lambda r: (r.bsns, r.q))
+        out = []
+        for r in reps:
+            for fs in ("CFS", "OFS"):
+                rows = self._stmt.get((r.bsns, r.q, fs))
+                if rows and rows[0].get("origin") == "document":
+                    out.append(f"{qlabel(r.bsns, r.q)}({BASIS_KO[fs]}): OpenDART 재무정보 API에 수치가 없어 "
+                               f"공시원문 {r.report_nm}(접수번호 {r.rcept_no})의 손익계산서에서 직접 추출함.")
+        return out
+
+    def replacement_notes(self, reps=None):
+        """원래 고른 접수본을 읽지 못해 같은 기간의 다른 접수본으로 대체한 내역."""
+        reps = reps if reps is not None else sorted(self.reports.values(), key=lambda r: (r.bsns, r.q))
+        return [f"{qlabel(r.bsns, r.q)} 재무수치: {r.replaced}에서 손익계산서를 읽지 못해 "
+                f"같은 기간의 {r.report_nm}(접수번호 {r.rcept_no})를 사용함." for r in reps if r.replaced]
 
     # -- 연결·개별 변경 ------------------------------------------------------
     def basis_changes(self, quarters):
@@ -612,6 +661,37 @@ class CompanyRun:
     def window_label(code):
         return TTM_WINDOWS[code][1] if code in TTM_WINDOWS else "최근 4개 분기(회사별 최신 공시 기준)"
 
+    def probe_missing(self, keys):
+        """공시목록에 없는 (분기말이 지난) 분기를 재무정보 API로 확인해 보고서 목록에 추가.
+        API 모드 전용(client.probe_report). 4Q 는 '연간 − 3분기 누적'이라 같은 해 3Q 도 확인한다."""
+        probe = getattr(self.client, "probe_report", None)
+        if not probe:
+            return
+        want = []
+        for (y, q) in keys:
+            want += [(y, q)] + ([(y, 3)] if q == 4 else [])
+        for (y, q) in dict.fromkeys(want):
+            end = quarter_end(y, q, self.fye)
+            if (y, q) in self.reports or end >= self.today:
+                continue
+            try:
+                rn = probe(self.cc, y, REPRT[q])
+            except DartError:
+                continue
+            if not rn:
+                continue
+            typ = "사업보고서" if q == 4 else "반기보고서" if q == 2 else "분기보고서"
+            nm = f"{typ} ({end.year}.{end.month:02d})"
+            rep = build_reports([{"report_nm": nm, "rcept_no": rn, "rcept_dt": rn[:8],
+                                  "found_via": "재무정보 API"}], self.fye).get((y, q))
+            if rep:
+                self.reports[(y, q)] = rep
+
+    def probe_notes(self):
+        return [f"{qlabel(r.bsns, r.q)}: OpenDART 공시목록(list.json)에서 보고서를 찾지 못해 "
+                f"재무정보 API의 접수번호({r.rcept_no})로 보고서를 확인함."
+                for r in sorted(self.reports.values(), key=lambda r: (r.bsns, r.q)) if r.found_via]
+
     def compute_window(self, code, base_year, items):
         """합산 구간 하나에 대한 분기별 상세 + 4개 분기 합계."""
         w = {"code": code, "label": self.window_label(code), "base_year": base_year, "items": items,
@@ -622,11 +702,13 @@ class CompanyRun:
             w["ttm"] = {i: dict(self._fail("unavailable", err), mode="TTM", basis=None, mixed=False,
                                 period_label=None, window=code, window_label=w["label"]) for i in ITEMS}
             return w
+        self.probe_missing(self.quarter_keys(end_key))
         qs = self.compute_quarters(end_key)
         ttm = self.compute_ttm(qs, code)
         ch = self.basis_changes(qs)
         w.update(period_label=ttm["revenue"]["period_label"], quarters=qs, ttm=ttm, basis_changes=ch,
-                 notes=self.basis_notes(qs, ch) + self.ni_fallback_notes(qs))
+                 notes=self.basis_notes(qs, ch) + self.ni_fallback_notes(qs) + self.replacement_notes()
+                 + self.origin_notes() + self.probe_notes())
         return w
 
     def run(self, periods, base_year=None):

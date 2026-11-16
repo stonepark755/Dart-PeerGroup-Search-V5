@@ -9,7 +9,6 @@ import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime
 from difflib import SequenceMatcher
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -18,7 +17,9 @@ import base64
 
 from dart import DartClient, DartError, Store
 from dart_web import WebClient
-from engine import CompanyRun, ITEMS, PERIOD_CODES, NI_FALLBACK_ORDERS, DEFAULT_NI_ORDER
+from dart import KST, now_kst, today_kst
+from engine import (CompanyRun, ITEMS, PERIOD_CODES, NI_FALLBACK_ORDERS, DEFAULT_NI_ORDER,
+                    REPRT, build_reports, prev_quarter, period_info, qlabel, month_end, shift_month_end)
 from xlsx import build_workbook
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -162,7 +163,7 @@ def resolve_names(names, market_depth=3):
 # ------------------------------------------------------------------ 조회 실행
 def norm_base_year(v):
     """기준연도(=금년). 미지정·이상값이면 검색일의 연도."""
-    this = date.today().year
+    this = today_kst().year
     try:
         y = int(v)
     except (TypeError, ValueError):
@@ -175,7 +176,7 @@ def run_one(item, searched_at, base_year, ni_order=DEFAULT_NI_ORDER):
     req = item.get("periods") or {}
     periods = {i: (req.get(i) if req.get(i) in PERIOD_CODES else "FY") for i in ITEMS}
     try:
-        res = CompanyRun(CLIENT, company, date.today(), ni_order).run(periods, base_year)
+        res = CompanyRun(CLIENT, company, today_kst(), ni_order).run(periods, base_year)
         res["periods"] = periods
         res["ni_order"] = ni_order
         if res.get("has_ttm"):
@@ -200,7 +201,7 @@ def run_one(item, searched_at, base_year, ni_order=DEFAULT_NI_ORDER):
 
 
 def run_query(payload):
-    searched_at = datetime.now().isoformat(timespec="seconds")
+    searched_at = now_kst().strftime("%Y-%m-%dT%H:%M:%S")   # 한국시간(오프셋 표기 없이 저장·표시)
     items = payload.get("items") or []
     base_year = norm_base_year(payload.get("base_year"))
     ni_order = payload.get("ni_order")
@@ -211,13 +212,58 @@ def run_query(payload):
             "ni_order": ni_order, "results": results}
 
 
+# ------------------------------------------------------------------ 진단
+def diag(code):
+    """한 종목의 OpenDART 원응답(캐시 미사용)을 그대로 보여 준다. 예: /api/diag?code=012450"""
+    from datetime import date, datetime
+    today = today_kst()
+    end = today.strftime("%Y%m%d")
+    bgn5 = date(today.year - 5, today.month, min(today.day, 28)).strftime("%Y%m%d")
+    out = {"source": SOURCE, "today_kst": today.isoformat(), "code": code}
+    corps = [c for c in CLIENT.corp_list() if code in (c.get("stock_code"), c.get("corp_code"))]
+    out["corp_matches"] = corps
+    if not corps:
+        return out
+    cc = corps[0]["corp_code"]
+    info = CLIENT.company(cc) or {}
+    out["company"] = {k: info.get(k) for k in ("corp_name", "stock_code", "acc_mt", "corp_cls")}
+    fye = int(info.get("acc_mt") or 12)
+    brief = lambda rows: [{k: r.get(k) for k in ("report_nm", "rcept_no", "rcept_dt", "corp_name")} for r in rows]  # noqa: E731
+    if SOURCE == "api":
+        for name, bgn in (("list_5y", bgn5), ("list_recent", f"{today.year - 1}0101")):
+            rows, meta = CLIENT.list_raw(cc, bgn, end)
+            out[name] = {"bgn_de": bgn, "end_de": end, **meta, "rows": brief(rows)}
+        c = CLIENT.list_cached(cc, bgn5, end)
+        out["list_5y_server_cache"] = None if c is None else {
+            "fetched_at_kst": datetime.fromtimestamp(c["fetched_at"], KST).isoformat(timespec="seconds"),
+            "status": c["status"], "rows": brief(c["rows"])}
+        rows5 = out["list_5y"]["rows"]
+    else:
+        rows5 = brief(CLIENT.list_periodic(cc, bgn5, end))
+        out["list_5y"] = {"bgn_de": bgn5, "end_de": end, "rows": rows5}
+    reps = build_reports(rows5, fye)
+    out["recognized"] = {qlabel(*k): {"report_nm": r.report_nm, "rcept_no": r.rcept_no}
+                         for k, r in sorted(reps.items())}
+    if SOURCE == "api":
+        d = month_end(today.year, today.month)             # 검색일 이전에 끝난 가장 최근 회계분기
+        while not (period_info(d, fye)[1] and d < today):
+            d = shift_month_end(d, -1)
+        k = period_info(d, fye)
+        fn = {}
+        for _ in range(6):
+            fn[qlabel(*k)] = {fs: CLIENT.statement_raw(cc, k[0], REPRT[k[1]], fs) for fs in ("CFS", "OFS")}
+            k = prev_quarter(*k)
+        out["fnltt"] = fn
+    return out
+
+
 # ------------------------------------------------------------------ HTTP
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *a):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % a))
 
-    def _json(self, obj, code=200):
-        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+    def _json(self, obj, code=200, pretty=False):
+        body = json.dumps(obj, ensure_ascii=False, indent=1 if pretty else None).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -247,6 +293,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if u.path == "/api/status":
                 return self._json({"has_key": SOURCE == "web" or bool(KEY["v"]), "source": SOURCE})
+            if u.path == "/api/diag":
+                code = (parse_qs(u.query).get("code") or [""])[0].strip()
+                return self._json(diag(code), pretty=True) if code else self._json({"error": "code 파라미터 필요"}, 400)
             if u.path == "/api/search":
                 q = (parse_qs(u.query).get("q") or [""])[0]
                 return self._json({"results": search_corp(q)})
