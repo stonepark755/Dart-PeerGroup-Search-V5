@@ -22,6 +22,9 @@ REPORTS = [("반기보고서 (2025.06)", "20250814000001"), ("분기보고서 (2
            ("사업보고서 (2025.12)", "20260316001112"), ("분기보고서 (2026.03)", "20260513000860"),
            ("반기보고서 (2026.06)", "20260814000001"), ("분기보고서 (2026.09)", Q3)]
 NO_DATA = {"status": "013", "message": "조회된 데이타가 없습니다."}
+# document.xml 은 오류를 XML 로 돌려준다(실제 응답 형식)
+XML_014 = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+           '<result><status>014</status><message>파일이 존재하지 않습니다.</message></result>').encode("utf-8")
 ALL3 = lambda c: {"revenue": c, "operating_income": c, "net_income": c}  # noqa: E731
 
 
@@ -54,7 +57,7 @@ class FakeHttpClient(DartClient):
             k = (str(params["bsns_year"]), params["reprt_code"], params["fs_div"])
             out = {"status": "000", "list": self.api[k]} if k in self.api else NO_DATA
         elif endpoint == "document.xml":
-            return self.docs.get(params["rcept_no"], json.dumps({"status": "014", "message": "파일이 존재하지 않습니다."}).encode())
+            return self.docs.get(params["rcept_no"], XML_014)
         else:
             raise AssertionError(endpoint)
         return json.dumps(out, ensure_ascii=False).encode("utf-8")
@@ -150,6 +153,48 @@ class ApiDocumentFallback(unittest.TestCase):
         c.api[("2026", "11014", "CFS")] = rows("CFS", 1, 1, 1, "late")              # 이후 API 에 반영됨
         self.assertTrue(c.api_statement("x", 2026, "11014", "CFS"))
         self.assertEqual(c.n("fnlttSinglAcntAll.json", reprt_code="11014", fs_div="CFS"), 2)
+
+    def test_same_day_filing_recovers_within_minutes(self):
+        """HB솔루션 재현: 3분기보고서가 검색 당일 접수 → 재무정보 API·원문 모두 아직 없음(013/014).
+        2025 3분기보고서엔 지배기업 귀속 순이익이 없어 2025 4Q 순이익도 2026 3분기보고서의 전기 비교정보에 의존."""
+        from unittest import mock
+        api = api_rows()
+        api[("2025", "11014", "CFS")] = [r for r in api[("2025", "11014", "CFS")]
+                                         if "Attributable" not in (r["account_id"] or "")]
+        c = FakeHttpClient(self.store, api, {})
+        with mock.patch("dart.today_kst", lambda: TODAY):              # 접수 다음 날 검색(최근 공시)
+            r1 = self.run_engine(c)
+        q3 = r1["quarters"][-1]["items"]["revenue"]
+        self.assertIsNone(q3["value"])
+        self.assertIn("OpenDART 014: 파일이 존재하지 않습니다.", q3["message"])
+        self.assertIn("잠시 후 다시 검색", q3["message"])
+        self.assertNotIn("<?xml", q3["message"])
+        self.assertEqual(r1["quarters"][0]["items"]["net_income"]["status"], "unverified")
+        # 몇 분 뒤 재무정보 API 반영 → 1분 지난 '데이터 없음'은 재사용하지 않고 다시 조회
+        api[("2026", "11014", "CFS")] = rows("CFS", 330 * B, 33 * B, 23 * B, Q3,
+                                             add={"rev": 960 * B, "op": 96 * B, "ni": 66 * B},
+                                             prev_add={"rev": 870 * B, "op": 87 * B, "ni": 57 * B})
+        with self.store.lock:
+            self.store.db.execute("UPDATE raw_cache SET fetched_at = fetched_at - 61 WHERE k LIKE 'fnlttSinglAcntAll%'")
+        with mock.patch("dart.today_kst", lambda: TODAY):
+            r2 = self.run_engine(c)
+        self.assertEqual(r2["items"]["revenue"]["status"], "verified", r2["items"]["revenue"].get("message"))
+        self.assertEqual(r2["items"]["revenue"]["value"], 1360 * B)
+        q4ni = r2["quarters"][0]["items"]["net_income"]
+        self.assertEqual(q4ni["value"], 30 * B)                                   # 87 − 57 (2026 3Q 의 전기 누적)
+        self.assertIn("비교정보", q4ni["message"])
+
+    def test_recent_filing_and_error_parsing(self):
+        from datetime import date
+        from unittest import mock
+        import dart
+        with mock.patch("dart.today_kst", lambda: date(2026, 11, 16)):
+            self.assertTrue(dart.is_recent_filing("20261116000323"))      # 당일
+            self.assertTrue(dart.is_recent_filing("20261113000001"))      # 3일 전
+            self.assertFalse(dart.is_recent_filing("20261112000647"))     # 4일 전 → '없음' 1시간 재사용
+            self.assertFalse(dart.is_recent_filing("bad"))
+        self.assertEqual(dart.opendart_error(XML_014), ("014", "파일이 존재하지 않습니다."))
+        self.assertEqual(dart.opendart_error(json.dumps(NO_DATA).encode()), ("013", "조회된 데이타가 없습니다."))
 
     def test_annual_fy_from_document(self):
         from fixture_dart_xml import annual_xml

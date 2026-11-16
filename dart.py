@@ -34,6 +34,31 @@ def now_kst():
 def today_kst():
     return now_kst().date()
 
+
+RECENT_FILING_DAYS = 3        # 접수 후 이 기간 안의 공시는 OpenDART 재무정보·원문 반영 전일 수 있음
+
+
+def is_recent_filing(rcept_no):
+    """접수번호 앞 8자리(접수일)가 최근 RECENT_FILING_DAYS 일 이내인지."""
+    try:
+        d = datetime.strptime(str(rcept_no)[:8], "%Y%m%d").date()
+    except ValueError:
+        return False
+    return 0 <= (today_kst() - d).days <= RECENT_FILING_DAYS
+
+
+def opendart_error(body):
+    """OpenDART 오류 응답(JSON 또는 XML) → (status, message)."""
+    txt = body.decode("utf-8", "replace")
+    m = re.search(r"<status>\s*(\w+)\s*</status>.*?<message>(.*?)</message>", txt, re.S)
+    if m:
+        return m.group(1), m.group(2).strip()
+    try:
+        d = json.loads(txt)
+        return d.get("status"), d.get("message")
+    except ValueError:
+        return None, re.sub(r"<[^>]+>", " ", txt)[:100].strip()
+
 BASE = "https://opendart.fss.or.kr/api/"
 REPRT_KO = {"11013": "1분기보고서", "11012": "반기보고서", "11014": "3분기보고서", "11011": "사업보고서"}
 DAY = 86400
@@ -240,19 +265,19 @@ class DartClient:
         return self._list(corp_code, bgn, end, "B", 3600)
 
     # 재무제표 ----------------------------------------------------------------
-    def api_statement(self, corp_code, bsns_year, reprt_code, fs_div):
+    def api_statement(self, corp_code, bsns_year, reprt_code, fs_div, empty_ttl=3600):
         """OpenDART 재무정보(단일회사 전체 재무제표). 없으면 None.
-        공시 직후엔 아직 반영 전일 수 있어 '없음' 응답은 1시간만 재사용."""
+        공시 직후엔 아직 반영 전일 수 있어 '없음' 응답은 짧게만 재사용(기본 1시간, 최근 공시는 1분)."""
         d = self._json("fnlttSinglAcntAll.json", {
             "corp_code": corp_code, "bsns_year": bsns_year,
-            "reprt_code": reprt_code, "fs_div": fs_div}, DAY, empty_ttl=3600)
+            "reprt_code": reprt_code, "fs_div": fs_div}, DAY, empty_ttl=empty_ttl)
         return (d.get("list") or None) if d.get("status") == "000" else None
 
     def probe_report(self, corp_code, bsns_year, reprt_code):
         """공시목록(list.json)에 없는 분기를 재무정보 API로 직접 확인 → 접수번호(없으면 None).
         재무정보 API 응답의 각 행에는 해당 정기보고서의 rcept_no 가 들어 있다."""
         for fs in ("CFS", "OFS"):
-            rows = self.api_statement(corp_code, bsns_year, reprt_code, fs)
+            rows = self.api_statement(corp_code, bsns_year, reprt_code, fs, empty_ttl=600)
             rn = next((r.get("rcept_no") for r in rows or [] if r.get("rcept_no")), None)
             if rn:
                 return rn
@@ -297,19 +322,29 @@ class DartClient:
           - API에 별도만 있고 연결 없음 → 원문에 연결재무제표가 실제로 있을 때만 원문의 연결 수치 사용
           - API에 연결만 있고 별도 없음 → 연결을 쓰므로 원문 불필요
         원문에서도 손익계산서를 못 찾으면 DocParseError(엔진이 같은 기간 다른 접수본으로 재시도)."""
-        rows = self.api_statement(corp_code, bsns_year, reprt_code, fs_div)
+        recent = is_recent_filing(rcept_no) if rcept_no else False
+        ttl = 60 if recent else 3600
+        rows = self.api_statement(corp_code, bsns_year, reprt_code, fs_div, ttl)
         if rows or not rcept_no:
             return rows
-        other = self.api_statement(corp_code, bsns_year, reprt_code, "OFS" if fs_div == "CFS" else "CFS")
-        if other:
-            if fs_div == "OFS" or not self.doc_has_consolidated(rcept_no):
+        other = self.api_statement(corp_code, bsns_year, reprt_code, "OFS" if fs_div == "CFS" else "CFS", ttl)
+        hint = (f" — {rcept_no[:4]}.{rcept_no[4:6]}.{rcept_no[6:8]} 접수된 최근 공시라 OpenDART 재무정보·원문 제공 전일 수 있음."
+                f" 잠시 후 다시 검색하세요") if recent else ""
+        try:
+            if other:
+                if fs_div == "OFS" or not self.doc_has_consolidated(rcept_no):
+                    return None
+                return self.doc_statements(rcept_no)["CFS"] or None
+            doc = self.doc_statements(rcept_no)
+        except (DocParseError, DartError) as ex:
+            if other:                            # 별도는 API 에 있으니 연결 원문 확인 실패는 기존처럼 처리
                 return None
-            return self.doc_statements(rcept_no)["CFS"] or None
-        doc = self.doc_statements(rcept_no)
+            raise DocParseError(f"OpenDART 재무정보 API에 {bsns_year}년 {REPRT_KO.get(reprt_code, reprt_code)} "
+                                f"수치가 없음. {ex}{hint}")
         if not doc["CFS"] and not doc["OFS"]:
             raise DocParseError(
                 f"OpenDART 재무정보 API에 {bsns_year}년 {REPRT_KO.get(reprt_code, reprt_code)} 수치가 없고, "
-                f"공시원문(접수번호 {rcept_no})에서도 손익계산서를 찾지 못함")
+                f"공시원문(접수번호 {rcept_no})에서도 손익계산서를 찾지 못함{hint}")
         return doc[fs_div] or None
 
     def document_zip(self, rcept_no):
@@ -319,11 +354,9 @@ class DartClient:
                 return self._doc_raw[rcept_no]
         body = self._http("document.xml", {"rcept_no": rcept_no})
         if not body.startswith(b"PK"):
-            try:
-                msg = json.loads(body.decode("utf-8")).get("message")
-            except ValueError:
-                msg = body[:120].decode("utf-8", "replace")
-            raise DocParseError(f"공시원문(document.xml, 접수번호 {rcept_no}) 수신 실패: {msg}")
+            st, msg = opendart_error(body)
+            raise DocParseError(f"공시원문(document.xml, 접수번호 {rcept_no})을 받지 못함"
+                                f"(OpenDART {st or '?'}: {msg or '응답 해석 불가'})")
         with self._doc_lock:
             self._doc_raw[rcept_no] = body
             while len(self._doc_raw) > 6:

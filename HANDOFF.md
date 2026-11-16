@@ -1,5 +1,12 @@
 # HANDOFF — DART 재무실적 조회 에이전트 v5.1 (4개 분기 합산 구간 고정 + 정정공시 접수본 선택 + 한국시간)
 
+## 0-00. v5.4 (2026-11-16) — 당일 공시 처리
+- 사례: HB솔루션(297890) 3분기보고서 20261116000323 이 검색 당일 접수 → 13:09 검색 시 재무정보 API 013, document.xml 014(파일 없음). 몇 분 뒤 /api/diag 에선 재무정보 API 000. 그런데 013 을 1시간 재사용해 계속 실패. 2025 4Q 순이익도 2025 3분기보고서에 지배기업 귀속 누적이 없어 2026 3분기보고서의 전기 비교정보에 의존 → 함께 실패.
+- `dart.is_recent_filing(rcept_no)` : 접수일이 `RECENT_FILING_DAYS`(3)일 이내. `statement()`에서 최근 공시면 '데이터 없음' 재사용 60초(그 외 3600초), `probe_report()`는 600초.
+- `dart.opendart_error(body)` : OpenDART 오류 응답(XML·JSON) → (status, message). document.xml 오류는 XML 이라 기존엔 원문 일부(깨진 글자)가 그대로 노출됐음.
+- 최근 공시 실패 시 메시지에 "…접수된 최근 공시라 OpenDART 재무정보·원문 제공 전일 수 있음. 잠시 후 다시 검색하세요" 추가.
+- 테스트: `test_same_day_filing_recovers_within_minutes`, `test_recent_filing_and_error_parsing`. 전체 62개.
+
 ## 0-0. v5.3 (2026-11-16) — 공시목록 누락 보완 + 진단 페이지
 - 배포(v5.2) 후에도 한화에어로스페이스 2026 3Q 가 '보고서 미공시(최근 공시: 2026년 2Q)' → 재무정보 API 이전 단계인 **공시목록(list.json)에서 3분기보고서를 못 받아온 것**. 코드상 원인 미확인(기간·페이지·보고서명 해석 모두 정상 경로, 같은 목록에서 1Q·2Q는 인식).
 - `engine.CompanyRun.probe_missing(keys)` : 구간 분기(+4Q면 같은 해 3Q) 중 목록에 없고 분기말이 지난 것을 `client.probe_report()`로 확인해 `self.reports`에 추가(`found_via="재무정보 API"`). `probe_notes()`로 주석 기록. WebClient 에는 probe_report 가 없어 웹 모드는 영향 없음.
@@ -45,7 +52,7 @@
 - 순수 Python 표준 라이브러리 HTTP 서버(`server.py`) + 단일 HTML(`static/index.html`) + 자체 xlsx 작성기(`xlsx.py`).
 - 데이터 소스: `DATA_SOURCE=web`(기본, DART 공시원문 스크래핑 `dart_web.py`) / `api`(OpenDART, `dart.py`).
 - 실행: `python server.py` (포트 `PORT`, 기본 8000). API 키는 `DART_API_KEY` 환경변수 또는 `.env`.
-- 테스트: `python -m unittest discover -s tests` → **현재 60개 전부 통과** (ResourceWarning은 기존 test_web의 SQLite 미종료로, 무해).
+- 테스트: `python -m unittest discover -s tests` → **현재 62개 전부 통과** (ResourceWarning은 기존 test_web의 SQLite 미종료로, 무해).
 
 ## 2. 이번 작업(v4 → v5)의 요구사항
 **문제:** 조회기간 `최근 4개 분기`가 회사별 *최신 공시 보고서*(`max(self.reports)`) 기준이어서,
