@@ -1,5 +1,13 @@
 # HANDOFF — DART 재무실적 조회 에이전트 v5.1 (4개 분기 합산 구간 고정 + 정정공시 접수본 선택 + 한국시간)
 
+## 0-0. v5.3 (2026-11-16) — 공시목록 누락 보완 + 진단 페이지
+- 배포(v5.2) 후에도 한화에어로스페이스 2026 3Q 가 '보고서 미공시(최근 공시: 2026년 2Q)' → 재무정보 API 이전 단계인 **공시목록(list.json)에서 3분기보고서를 못 받아온 것**. 코드상 원인 미확인(기간·페이지·보고서명 해석 모두 정상 경로, 같은 목록에서 1Q·2Q는 인식).
+- `engine.CompanyRun.probe_missing(keys)` : 구간 분기(+4Q면 같은 해 3Q) 중 목록에 없고 분기말이 지난 것을 `client.probe_report()`로 확인해 `self.reports`에 추가(`found_via="재무정보 API"`). `probe_notes()`로 주석 기록. WebClient 에는 probe_report 가 없어 웹 모드는 영향 없음.
+- `dart.DartClient.probe_report(corp_code, bsns_year, reprt_code)` : 재무정보 API(CFS→OFS) 행의 `rcept_no` 반환.
+- 진단 `GET /api/diag?code=012450` (상세조회 화면에 링크) : 캐시 미사용 OpenDART 원응답 — `list_5y`(5년 범위), `list_recent`(전년 1/1~), `list_5y_server_cache`(서버 캐시본), `recognized`(인식된 보고서), `fnltt`(최근 6개 분기 CFS/OFS 상태·행수·rcept_no). `DartClient.list_raw/list_cached/statement_raw` 추가.
+- **다음 단계: 배포 후 /api/diag?code=012450 결과로 원인 확정** — list_5y·list_recent 에 '분기보고서 (2026.09)' 유무, 서버 캐시본과 차이, fnltt 2026년 3Q 상태.
+- 테스트 `tests/test_probe_diag.py`(4개). 전체 60개 통과.
+
 ## 0-1. v5.2 추가 수정 (2026-11-16) — API 모드 원문 폴백
 - 배경: 배포본은 `DATA_SOURCE=api`. 한화에어로스페이스 2026 3분기보고서(20261112000647, 11/12 공시)가 DART엔 있으나 재무정보 API가 수치를 주지 않아 '작년 4Q~금년 3Q' 산출 불가(사용자 보고). 실제 API 응답은 미확인(작업공간에서 OpenDART 접속 불가).
 - `dart.py` `DartClient`
@@ -37,7 +45,7 @@
 - 순수 Python 표준 라이브러리 HTTP 서버(`server.py`) + 단일 HTML(`static/index.html`) + 자체 xlsx 작성기(`xlsx.py`).
 - 데이터 소스: `DATA_SOURCE=web`(기본, DART 공시원문 스크래핑 `dart_web.py`) / `api`(OpenDART, `dart.py`).
 - 실행: `python server.py` (포트 `PORT`, 기본 8000). API 키는 `DART_API_KEY` 환경변수 또는 `.env`.
-- 테스트: `python -m unittest discover -s tests` → **현재 56개 전부 통과** (ResourceWarning은 기존 test_web의 SQLite 미종료로, 무해).
+- 테스트: `python -m unittest discover -s tests` → **현재 60개 전부 통과** (ResourceWarning은 기존 test_web의 SQLite 미종료로, 무해).
 
 ## 2. 이번 작업(v4 → v5)의 요구사항
 **문제:** 조회기간 `최근 4개 분기`가 회사별 *최신 공시 보고서*(`max(self.reports)`) 기준이어서,

@@ -36,9 +36,10 @@ def api_rows():
 
 
 class FakeHttpClient(DartClient):
-    def __init__(self, store, api, docs):
+    def __init__(self, store, api, docs, reports=None):
         super().__init__(lambda: "k" * 40, store)
         self.api, self.docs, self.calls = api, docs, []
+        self.reports = REPORTS if reports is None else reports
 
     def _http(self, endpoint, params):
         self.calls.append((endpoint, params.get("bsns_year"), params.get("reprt_code"),
@@ -46,7 +47,7 @@ class FakeHttpClient(DartClient):
         if endpoint == "company.json":
             out = {"status": "000", "acc_mt": "12", "corp_cls": "Y"}
         elif endpoint == "list.json":
-            lst = [{"report_nm": n, "rcept_no": r, "rcept_dt": r[:8]} for n, r in REPORTS] \
+            lst = [{"report_nm": n, "rcept_no": r, "rcept_dt": r[:8]} for n, r in self.reports] \
                 if params.get("pblntf_ty") == "A" else []
             out = {"status": "000", "total_page": 1, "list": lst}
         elif endpoint == "fnlttSinglAcntAll.json":

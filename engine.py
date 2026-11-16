@@ -251,7 +251,8 @@ class Report:
     def public(self):
         return {"report_nm": self.report_nm, "rcept_no": self.rcept_no, "rcept_dt": self.rcept_dt,
                 "period_end": self.end.isoformat(), "corrected": self.corrected,
-                "replaced": self.replaced, "url": DART_VIEW + self.rcept_no}
+                "replaced": self.replaced, "found_via": getattr(self, "found_via", None),
+                "url": DART_VIEW + self.rcept_no}
 
 
 def build_reports(rows, fye):
@@ -269,7 +270,8 @@ def build_reports(rows, fye):
                      rcept_dt=r.get("rcept_dt"), bsns=bsns, q=q, end=end,
                      start=(shift_month_end(end, -12) if q == 4 else shift_month_end(end, -3)) + timedelta(days=1),
                      corrected="정정" in r["report_nm"],
-                     attach_only=bool(ATTACH_ONLY_RE.search(r["report_nm"])), alternates=[], replaced=None)
+                     attach_only=bool(ATTACH_ONLY_RE.search(r["report_nm"])), alternates=[], replaced=None,
+                     found_via=r.get("found_via"))
         cands.setdefault((bsns, q), {})[rep.rcept_no] = rep
     best = {}
     for k, reps in cands.items():
@@ -659,6 +661,37 @@ class CompanyRun:
     def window_label(code):
         return TTM_WINDOWS[code][1] if code in TTM_WINDOWS else "최근 4개 분기(회사별 최신 공시 기준)"
 
+    def probe_missing(self, keys):
+        """공시목록에 없는 (분기말이 지난) 분기를 재무정보 API로 확인해 보고서 목록에 추가.
+        API 모드 전용(client.probe_report). 4Q 는 '연간 − 3분기 누적'이라 같은 해 3Q 도 확인한다."""
+        probe = getattr(self.client, "probe_report", None)
+        if not probe:
+            return
+        want = []
+        for (y, q) in keys:
+            want += [(y, q)] + ([(y, 3)] if q == 4 else [])
+        for (y, q) in dict.fromkeys(want):
+            end = quarter_end(y, q, self.fye)
+            if (y, q) in self.reports or end >= self.today:
+                continue
+            try:
+                rn = probe(self.cc, y, REPRT[q])
+            except DartError:
+                continue
+            if not rn:
+                continue
+            typ = "사업보고서" if q == 4 else "반기보고서" if q == 2 else "분기보고서"
+            nm = f"{typ} ({end.year}.{end.month:02d})"
+            rep = build_reports([{"report_nm": nm, "rcept_no": rn, "rcept_dt": rn[:8],
+                                  "found_via": "재무정보 API"}], self.fye).get((y, q))
+            if rep:
+                self.reports[(y, q)] = rep
+
+    def probe_notes(self):
+        return [f"{qlabel(r.bsns, r.q)}: OpenDART 공시목록(list.json)에서 보고서를 찾지 못해 "
+                f"재무정보 API의 접수번호({r.rcept_no})로 보고서를 확인함."
+                for r in sorted(self.reports.values(), key=lambda r: (r.bsns, r.q)) if r.found_via]
+
     def compute_window(self, code, base_year, items):
         """합산 구간 하나에 대한 분기별 상세 + 4개 분기 합계."""
         w = {"code": code, "label": self.window_label(code), "base_year": base_year, "items": items,
@@ -669,12 +702,13 @@ class CompanyRun:
             w["ttm"] = {i: dict(self._fail("unavailable", err), mode="TTM", basis=None, mixed=False,
                                 period_label=None, window=code, window_label=w["label"]) for i in ITEMS}
             return w
+        self.probe_missing(self.quarter_keys(end_key))
         qs = self.compute_quarters(end_key)
         ttm = self.compute_ttm(qs, code)
         ch = self.basis_changes(qs)
         w.update(period_label=ttm["revenue"]["period_label"], quarters=qs, ttm=ttm, basis_changes=ch,
                  notes=self.basis_notes(qs, ch) + self.ni_fallback_notes(qs) + self.replacement_notes()
-                 + self.origin_notes())
+                 + self.origin_notes() + self.probe_notes())
         return w
 
     def run(self, periods, base_year=None):

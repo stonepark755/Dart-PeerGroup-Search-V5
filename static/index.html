@@ -361,7 +361,8 @@ function renderDetail(i){
     +(w.quarters?renderWindow(w):`<p class="errcell">${esc(w.error||"산출 불가")}</p>`)).join("");
   $("#detail").innerHTML=`<div class="panel card">
     <h3>${esc(r.corp_name)} <span class="per">${esc(r.stock_code)} · ${esc(r.market||"")}</span></h3>
-    <p class="hint">4개 분기 실적 · 기준연도(금년) ${esc(r.base_year??"")}년 · 단위 원 · 각 구간에서 세 항목을 모두 표시합니다.</p>
+    <p class="hint">4개 분기 실적 · 기준연도(금년) ${esc(r.base_year??"")}년 · 단위 원 · 각 구간에서 세 항목을 모두 표시합니다.
+      · <a href="/api/diag?code=${encodeURIComponent(r.stock_code||r.corp_code)}" target="_blank" rel="noopener">진단 정보(OpenDART 원응답)</a></p>
     ${body}</div>`;
 }
 function renderWindow(w){

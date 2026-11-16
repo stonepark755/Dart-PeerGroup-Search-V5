@@ -248,6 +248,49 @@ class DartClient:
             "reprt_code": reprt_code, "fs_div": fs_div}, DAY, empty_ttl=3600)
         return (d.get("list") or None) if d.get("status") == "000" else None
 
+    def probe_report(self, corp_code, bsns_year, reprt_code):
+        """공시목록(list.json)에 없는 분기를 재무정보 API로 직접 확인 → 접수번호(없으면 None).
+        재무정보 API 응답의 각 행에는 해당 정기보고서의 rcept_no 가 들어 있다."""
+        for fs in ("CFS", "OFS"):
+            rows = self.api_statement(corp_code, bsns_year, reprt_code, fs)
+            rn = next((r.get("rcept_no") for r in rows or [] if r.get("rcept_no")), None)
+            if rn:
+                return rn
+        return None
+
+    # 진단(캐시 미사용) -------------------------------------------------------
+    def list_raw(self, corp_code, bgn, end, pblntf_ty="A"):
+        rows, page = [], 1
+        while True:
+            d = json.loads(self._http("list.json", {
+                "corp_code": corp_code, "bgn_de": bgn, "end_de": end, "pblntf_ty": pblntf_ty,
+                "last_reprt_at": "N", "page_no": page, "page_count": 100}).decode("utf-8"))
+            meta = {k: d.get(k) for k in ("status", "message", "total_count", "total_page")}
+            rows += d.get("list") or []
+            if d.get("status") != "000" or page >= int(d.get("total_page") or 1):
+                return rows, meta
+            page += 1
+
+    def list_cached(self, corp_code, bgn, end, pblntf_ty="A"):
+        """서버 캐시에 저장된 공시목록 1페이지(없으면 None) — 캐시가 낡았는지 확인용."""
+        params = {"corp_code": corp_code, "bgn_de": bgn, "end_de": end, "pblntf_ty": pblntf_ty,
+                  "last_reprt_at": "N", "page_no": 1, "page_count": 100}
+        ck = "list.json?" + "&".join(f"{k}={params[k]}" for k in sorted(params))
+        with self.store.lock:
+            row = self.store.db.execute("SELECT fetched_at, body FROM raw_cache WHERE k=?", (ck,)).fetchone()
+        if not row:
+            return None
+        d = json.loads(row[1])
+        return {"fetched_at": row[0], "rows": d.get("list") or [], "status": d.get("status")}
+
+    def statement_raw(self, corp_code, bsns_year, reprt_code, fs_div):
+        d = json.loads(self._http("fnlttSinglAcntAll.json", {
+            "corp_code": corp_code, "bsns_year": bsns_year,
+            "reprt_code": reprt_code, "fs_div": fs_div}).decode("utf-8"))
+        lst = d.get("list") or []
+        return {"status": d.get("status"), "message": d.get("message"), "rows": len(lst),
+                "rcept_no": lst[0].get("rcept_no") if lst else None}
+
     def statement(self, corp_code, bsns_year, reprt_code, fs_div, rcept_no=None):
         """재무정보 API 우선. API에 해당 보고서 수치가 없으면 공시원문(document.xml)에서 직접 추출.
           - API에 연결·별도 모두 없음 → 원문에서 추출(공시는 됐지만 재무정보 API 반영 전인 경우)
