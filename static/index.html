@@ -89,6 +89,27 @@ summary{cursor:pointer;padding:8px 12px;font-weight:600;font-size:14px}
 .spin{width:16px;height:16px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:sp .8s linear infinite}
 @keyframes sp{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.spin{animation:none}}
+.panelhead{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:4px}
+.panelhead h2{margin:0}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:flex-start;justify-content:center;z-index:50;padding:40px 16px;overflow:auto}
+.modal[hidden]{display:none}
+.modal-box{background:var(--surface);border:1px solid var(--line);border-radius:8px;max-width:640px;width:100%;padding:20px 22px;box-shadow:0 12px 40px rgba(0,0,0,.3)}
+.modal-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.modal-head h3{margin:0;font-size:17px}
+.modal .x{border:0;background:transparent;font-size:16px;padding:4px 8px;line-height:1}
+.modal-actions{display:flex;gap:12px;align-items:center;margin-top:14px;flex-wrap:wrap}
+textarea.excelcol{width:100%;resize:vertical;border:1px solid var(--line);border-radius:5px;padding:5px 10px;line-height:28px;background-color:var(--surface);background-image:repeating-linear-gradient(var(--surface),var(--surface) 27px,var(--line) 27px,var(--line) 28px)}
+.paste-results{margin-top:16px;max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:6px}
+.pres-sum{padding:8px 12px;border-bottom:1px solid var(--line);font-size:13px;color:var(--muted);background:var(--bg)}
+.pres-row{display:flex;gap:10px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line)}
+.pres-row:last-child{border-bottom:0}
+.pres-row.off{opacity:.55}
+.pres-in{width:140px;font-weight:600;overflow-wrap:anywhere;flex-shrink:0}
+.pres-arrow{color:var(--muted);flex-shrink:0}
+.pres-row select{flex:1;min-width:150px}
+.pres-row .miss{flex:1;color:var(--err);font-size:13px}
+.pres-row .exact{flex:1}
+.tag.miss{background:var(--err-bg);color:var(--err)}
 </style>
 </head>
 <body>
@@ -107,8 +128,11 @@ summary{cursor:pointer;padding:8px 12px;font-weight:600;font-size:14px}
   <!-- 화면 1 -->
   <section id="s1">
     <div class="panel">
-      <h2>종목 검색</h2>
-      <p class="hint">종목명 또는 6자리 종목코드를 입력하고 목록에서 선택하세요.</p>
+      <div class="panelhead">
+        <h2>종목 검색</h2>
+        <button type="button" id="pasteBtn">기업명 붙여넣기</button>
+      </div>
+      <p class="hint">종목명 또는 6자리 종목코드를 입력하고 목록에서 선택하세요. 여러 종목은 <strong>기업명 붙여넣기</strong>로 한 번에 추가할 수 있습니다.</p>
       <div class="search">
         <input type="text" id="q" placeholder="예: 삼성전자 또는 005930" autocomplete="off" aria-label="종목 검색">
         <div id="suggest" class="suggest" hidden></div>
@@ -177,6 +201,29 @@ summary{cursor:pointer;padding:8px 12px;font-weight:600;font-size:14px}
     <div id="detail"></div>
   </section>
 </main>
+
+<!-- 기업명 붙여넣기 모달 -->
+<div id="pasteModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="pasteTitle">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h3 id="pasteTitle">기업명 붙여넣기</h3>
+      <button type="button" class="x" id="pasteClose" aria-label="닫기">✕</button>
+    </div>
+    <p class="hint">엑셀에서 종목명이 세로로 나열된 <strong>한 열</strong>을 복사해 아래 칸에 그대로 붙여넣으세요. (한 줄에 한 종목) 상장 종목명과 정확히 일치하지 않아도 가장 비슷한 종목을 찾아 줍니다.</p>
+    <textarea id="pasteArea" class="excelcol" rows="12" placeholder="삼성전자&#10;SK하이닉스&#10;현대자동차&#10;..." aria-label="종목명 목록"></textarea>
+    <div class="modal-actions">
+      <button type="button" class="primary" id="pasteResolve">종목 찾기</button>
+      <button type="button" id="pasteCancel">취소</button>
+      <span class="status" id="pasteStatus"></span>
+    </div>
+    <div id="pasteResults" class="paste-results" hidden></div>
+    <div class="modal-actions" id="pasteAddBar" hidden>
+      <button type="button" class="primary" id="pasteAdd">선택한 종목 추가</button>
+      <button type="button" id="pasteBack">다시 붙여넣기</button>
+      <span class="status" id="pasteAddStatus"></span>
+    </div>
+  </div>
+</div>
 
 <script>
 const ITEMS=[["revenue","매출액"],["operating_income","영업이익"],["net_income","당기순이익"]];
@@ -274,6 +321,70 @@ document.querySelectorAll("[data-bulk]").forEach(el=>{
   el.innerHTML='<option value="">전체 적용…</option>'+PERIOD.map(([v,l])=>`<option value="${v}">${l}</option>`).join("");
   el.onchange=()=>{if(!el.value)return;state.selected.forEach(s=>s.periods[el.dataset.bulk]=el.value);el.value="";renderCond()};
 });
+
+/* ---------- 기업명 붙여넣기 ---------- */
+(()=>{
+  const modal=$("#pasteModal"),area=$("#pasteArea"),results=$("#pasteResults"),
+        addBar=$("#pasteAddBar"),st=$("#pasteStatus"),addSt=$("#pasteAddStatus");
+  let data=[];
+  function reset(){results.hidden=true;results.innerHTML="";addBar.hidden=true;st.textContent="";addSt.textContent="";data=[]}
+  const open=()=>{modal.hidden=false;reset();setTimeout(()=>area.focus(),0)};
+  const close=()=>{modal.hidden=true};
+  $("#pasteBtn").onclick=open;
+  $("#pasteClose").onclick=close;
+  $("#pasteCancel").onclick=close;
+  $("#pasteBack").onclick=reset;
+  modal.addEventListener("click",e=>{if(e.target===modal)close()});
+  document.addEventListener("keydown",e=>{if(!modal.hidden&&e.key==="Escape")close()});
+
+  const tagFor=s=>s==="ok"?'<span class="tag cfs">일치</span>':s==="approx"?'<span class="tag warn">유사</span>':'<span class="tag miss">없음</span>';
+
+  $("#pasteResolve").onclick=async()=>{
+    let names=area.value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+    if(!names.length){st.textContent="붙여넣은 종목명이 없습니다.";return}
+    let note="";
+    if(names.length>300){names=names.slice(0,300);note=" (최대 300개까지만 처리)"}
+    $("#pasteResolve").disabled=true;st.textContent="종목을 찾는 중…"+note;results.hidden=true;addBar.hidden=true;
+    try{
+      const r=await api("/api/resolve",{method:"POST",body:JSON.stringify({names})});
+      data=r.results||[];render();
+    }catch(e){st.textContent=e.message}
+    finally{$("#pasteResolve").disabled=false}
+  };
+
+  function render(){
+    const ok=data.filter(d=>d.status!=="notfound").length,miss=data.length-ok;
+    st.textContent="";results.hidden=false;
+    results.innerHTML=`<div class="pres-sum">${data.length}개 입력 · 매칭 ${ok}개 · 찾지 못함 ${miss}개 — 유사(노란색)는 후보를 바꾸거나 체크를 해제할 수 있습니다.</div>`+
+      data.map((d,i)=>{
+        if(d.status==="notfound")
+          return `<div class="pres-row off"><input type="checkbox" disabled><div class="pres-in">${esc(d.input)}</div><span class="pres-arrow">→</span><div class="miss">찾지 못함 — 직접 검색해 추가하세요</div>${tagFor(d.status)}</div>`;
+        const body=d.status==="approx"
+          ? `<select data-i="${i}" aria-label="${esc(d.input)} 후보">${d.candidates.map((c,j)=>`<option value="${j}">${esc(c.corp_name)} · ${esc(c.stock_code)} · ${esc(c.market||"")}${c.score!=null?` (유사도 ${Math.round(c.score*100)}%)`:""}</option>`).join("")}</select>`
+          : `<div class="exact"><strong>${esc(d.match.corp_name)}</strong> · ${esc(d.match.stock_code)} <span class="tag ${d.match.market==="KOSPI"?"kospi":"kosdaq"}">${esc(d.match.market||"")}</span></div>`;
+        return `<div class="pres-row"><input type="checkbox" data-chk="${i}" checked><div class="pres-in">${esc(d.input)}</div><span class="pres-arrow">→</span>${body}${tagFor(d.status)}</div>`;
+      }).join("");
+    addBar.hidden=false;addSt.textContent="";
+    results.querySelectorAll("select[data-i]").forEach(sel=>{sel.onchange=()=>{data[+sel.dataset.i]._sel=+sel.value}});
+  }
+
+  $("#pasteAdd").onclick=()=>{
+    let added=0,dup=0;
+    results.querySelectorAll("input[data-chk]").forEach(chk=>{
+      if(!chk.checked)return;
+      const d=data[+chk.dataset.chk];
+      const c=d.status==="approx"?d.candidates[d._sel||0]:d.match;
+      if(!c)return;
+      if(state.selected.some(s=>s.corp_code===c.corp_code)){dup++;return}
+      state.selected.push({corp_code:c.corp_code,corp_name:c.corp_name,stock_code:c.stock_code,market:c.market,
+        periods:{revenue:"FY",operating_income:"FY",net_income:"FY"}});
+      added++;
+    });
+    renderCond();
+    addSt.textContent=`${added}개 추가됨${dup?`, ${dup}개는 이미 추가되어 건너뜀`:""}.`;
+    if(added)setTimeout(close,800);
+  };
+})();
 
 /* ---------- 검색 실행 ---------- */
 $("#run").onclick=async()=>{

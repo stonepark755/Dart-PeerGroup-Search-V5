@@ -6,9 +6,11 @@ API 키: 환경변수 DART_API_KEY 또는 같은 폴더의 .env (DART_API_KEY=..
 import json
 import mimetypes
 import os
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
+from difflib import SequenceMatcher
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -66,17 +68,95 @@ def search_corp(q):
     scored.sort(key=lambda x: (x[0], len(x[1]["corp_name"])))
     cands = [c for _, c in scored[:25]]
 
-    def resolve(c):
-        if c.get("market"):
-            return c
-        try:
-            info = CLIENT.company(c["corp_code"])
-        except DartError:
-            return None
-        mk = MARKET.get(info.get("corp_cls"))     # KONEX(N)·기타(E)는 제외
-        return dict(c, market=mk) if mk else None
+    return [r for r in POOL.map(resolve_market, cands) if r][:10]
 
-    return [r for r in POOL.map(resolve, cands) if r][:10]
+
+def resolve_market(c):
+    """후보에 시장(KOSPI/KOSDAQ)을 채운다. KONEX·기타는 제외(None 반환)."""
+    if c.get("market"):
+        return c
+    try:
+        info = CLIENT.company(c["corp_code"])
+    except DartError:
+        return None
+    mk = MARKET.get(info.get("corp_cls"))         # KONEX(N)·기타(E)는 제외
+    return dict(c, market=mk) if mk else None
+
+
+# ------------------------------------------------------------------ 기업명 일괄 매칭(붙여넣기)
+_NAME_STRIP = re.compile(r"㈜|\(주\)|\(유\)|\(재\)|\(사\)|주식회사")
+
+
+def norm_name(s):
+    """비교용 정규화: (주)·주식회사·공백·괄호·구두점 제거, 소문자."""
+    s = _NAME_STRIP.sub("", s or "")
+    s = re.sub(r"[\s ().,\-_/·`'\"]", "", s)
+    return s.lower()
+
+
+def _candidates(qn, index, limit=5):
+    """정규화한 입력 qn 에 대한 상위 후보 [(score, corp), ...]."""
+    scored = []
+    for nn, c in index:
+        if not nn:
+            continue
+        if nn == qn:
+            r = 1.0
+        else:
+            r = SequenceMatcher(None, qn, nn).ratio()
+            if len(qn) >= 2 and (qn in nn or nn in qn):   # 포함관계면 가산
+                r = max(r, 0.9)
+        if r >= 0.45:
+            scored.append((r, c))
+    scored.sort(key=lambda x: (-x[0], len(x[1]["corp_name"])))
+    return scored[:limit]
+
+
+def resolve_names(names, market_depth=3):
+    """엑셀에서 붙여넣은 종목명 목록 -> 각 이름에 대해 상장 종목을 유사매칭.
+    반환: [{input, status(ok|approx|notfound), score, match, candidates}]."""
+    corps = CLIENT.corp_list()
+    index = [(norm_name(c["corp_name"]), c) for c in corps]
+
+    seen, todo = set(), []
+    for raw in names:
+        nm = (raw or "").strip()
+        if nm and nm not in seen:
+            seen.add(nm)
+            todo.append(nm)
+
+    prelim = [(nm, _candidates(norm_name(nm), index)) for nm in todo]
+
+    # 상위 후보들의 시장(KOSPI/KOSDAQ)을 일괄 조회(중복 corp_code 1회만)
+    need = {}
+    for _, cands in prelim:
+        for _, c in cands[:market_depth]:
+            need.setdefault(c["corp_code"], c)
+    resolved = dict(zip(need.keys(), POOL.map(resolve_market, need.values())))
+
+    def pub(c, score=None):
+        d = {"corp_code": c["corp_code"], "corp_name": c["corp_name"],
+             "stock_code": c["stock_code"], "market": c.get("market")}
+        if score is not None:
+            d["score"] = round(score, 3)
+        return d
+
+    out = []
+    for nm, cands in prelim:
+        listed = []                                   # KOSPI/KOSDAQ 로 확인된 후보만
+        for sc, c in cands[:market_depth]:
+            r = resolved.get(c["corp_code"])
+            if r:
+                listed.append((sc, r))
+        if not listed:
+            out.append({"input": nm, "status": "notfound", "score": None,
+                        "match": None, "candidates": []})
+            continue
+        top_score, top = listed[0]
+        status = "ok" if top_score >= 0.999 else "approx"
+        out.append({"input": nm, "status": status, "score": round(top_score, 3),
+                    "match": pub(top), "candidates": [pub(c, s) for s, c in listed]})
+    return out
 
 
 # ------------------------------------------------------------------ 조회 실행
@@ -210,6 +290,16 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
+        if path == "/api/resolve":
+            if SOURCE == "api" and not KEY["v"]:
+                return self._json({"error": "DART API 키가 설정되지 않았습니다."}, 400)
+            names = payload.get("names")
+            if not isinstance(names, list):
+                return self._json({"error": "잘못된 요청"}, 400)
+            try:
+                return self._json({"results": resolve_names([str(x) for x in names][:300])})
+            except DartError as e:
+                return self._json({"error": str(e)}, 502)
         if path == "/api/query":
             if SOURCE == "api" and not KEY["v"]:
                 return self._json({"error": "DART API 키가 설정되지 않았습니다."}, 400)
