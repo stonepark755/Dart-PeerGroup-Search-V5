@@ -348,6 +348,91 @@ def pick_statement_nodes(nodes):
     return out
 
 
+# --------------------------------------------------------------------------- #
+# OpenDART 공시원문(document.xml, DART XML) → 손익계산서 행
+#   API 모드에서 재무정보 API(fnlttSinglAcntAll)에 데이터가 없을 때 사용.
+#   웹 뷰어 HTML 과 같은 원본(DART XML)이므로 목차 선택·표 해석은 웹 모드 로직을 그대로 쓴다.
+# --------------------------------------------------------------------------- #
+XML_TITLE_RE = re.compile(r"<TITLE\b([^>]*)>(.*?)</TITLE>", re.S | re.I)
+XML_ENC_RE = re.compile(rb"""<\?xml[^>]*encoding=["']([\w\-]+)["']""", re.I)
+
+
+def decode_xml(data):
+    m = XML_ENC_RE.search(data[:200])
+    encs = ([m.group(1).decode()] if m else []) + ["utf-8", "cp949"]
+    for enc in encs:
+        try:
+            return data.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return data.decode("utf-8", "replace")
+
+
+def dart_xml_to_html(xml):
+    """DART XML 태그를 TokenParser 가 아는 HTML 태그로 바꾼다.
+    TE/TU(표 셀) → TD, TITLE → P, SECTION-n·TABLE-GROUP → DIV, PGBRK → BR, &cr; → 공백."""
+    s = re.sub(r"<\?xml[^>]*\?>", "", xml)
+    s = re.sub(r"<(/?)(?:TE|TU)\b", r"<\1TD", s, flags=re.I)
+    s = re.sub(r"<(/?)TITLE\b", r"<\1P", s, flags=re.I)
+    s = re.sub(r"<(/?)(?:SECTION-\d+|TABLE-GROUP|LIBRARY|COVER)\b", r"<\1DIV", s, flags=re.I)
+    s = re.sub(r"<PGBRK\b[^>]*/?>", "<BR>", s, flags=re.I)
+    return s.replace("&cr;", " ")
+
+
+def xml_toc(xml):
+    """목차 항목(TITLE ATOC="Y")별 구간 → [{text, start, end}]. 목차 표시가 없으면 모든 TITLE 사용."""
+    ms = [m for m in XML_TITLE_RE.finditer(xml) if re.search(r'ATOC\s*=\s*"Y"', m.group(1), re.I)] \
+        or list(XML_TITLE_RE.finditer(xml))
+    nodes = []
+    for i, m in enumerate(ms):
+        nodes.append({"text": _strip_tags(m.group(2)), "start": m.start(),
+                      "end": ms[i + 1].start() if i + 1 < len(ms) else len(xml)})
+    return nodes
+
+
+def parse_document_xml(xml, rcept_no):
+    """DART XML 문서 1개 → {"CFS": rows, "OFS": rows, "cfs_present": bool} (WebClient.parse_doc 와 같은 형식)."""
+    res = {"CFS": [], "OFS": [], "cfs_present": False}
+    nodes = xml_toc(xml)
+    fs_nodes = pick_statement_nodes(nodes)
+    if fs_nodes:
+        cands, stop_at_notes = fs_nodes, False
+    elif nodes:
+        cands, stop_at_notes = [n for n in nodes if not re.search(r"감사|검토", norm(n["text"]))], True
+    else:
+        cands, stop_at_notes = [{"text": "", "start": 0, "end": len(xml)}], False
+    for n in cands:
+        if stop_at_notes and (res["CFS"] or res["OFS"]) and "주석" in norm(n["text"]):
+            break
+        if stop_at_notes and "주석" in norm(n["text"]):
+            continue
+        toks = tokenize(dart_xml_to_html(xml[n["start"]:n["end"]]))
+        rows, _miss, cons_seen = extract_statements(
+            toks, rcept_no, default_consol=("연결" in norm(n["text"])), default_sj=_sj_of(n["text"]))
+        for r in rows:
+            r["origin"] = "document"
+            res[r["fs"]].append(r)
+        res["cfs_present"] = res["cfs_present"] or cons_seen
+    return res
+
+
+def parse_document_zip(body, rcept_no):
+    """document.xml 응답(zip) → 본문 XML 우선, 없으면 첨부 XML 순으로 손익계산서 추출."""
+    import io
+    import zipfile
+    with zipfile.ZipFile(io.BytesIO(body)) as z:
+        names = [n for n in z.namelist() if n.lower().endswith(".xml")]
+        names.sort(key=lambda n: (n != f"{rcept_no}.xml", "_" in n, n))   # 본문 → 첨부
+        merged = {"CFS": [], "OFS": [], "cfs_present": False, "file": None}
+        for n in names:
+            r = parse_document_xml(decode_xml(z.read(n)), rcept_no)
+            merged["cfs_present"] = merged["cfs_present"] or r["cfs_present"]
+            if r["CFS"] or r["OFS"]:
+                merged.update(CFS=r["CFS"], OFS=r["OFS"], file=n)
+                break
+        return merged
+
+
 def viewer_url(rcept_no, n):
     q = {"rcpNo": rcept_no, "dcmNo": n.get("dcmNo"), "eleId": n.get("eleId"), "offset": n.get("offset"),
          "length": n.get("length"), "dtd": n.get("dtd") or "dart4.xsd"}

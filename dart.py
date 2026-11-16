@@ -35,6 +35,7 @@ def today_kst():
     return now_kst().date()
 
 BASE = "https://opendart.fss.or.kr/api/"
+REPRT_KO = {"11013": "1분기보고서", "11012": "반기보고서", "11014": "3분기보고서", "11011": "사업보고서"}
 DAY = 86400
 
 
@@ -145,6 +146,7 @@ class DartClient:
         self._corps = None
         self._corps_at = 0
         self._corps_lock = threading.Lock()
+        self._doc_raw, self._doc_lock = {}, threading.Lock()   # 공시원문 zip (최근 몇 건만 메모리 보관)
 
     # low level ---------------------------------------------------------------
     def _http(self, endpoint, params):
@@ -165,9 +167,13 @@ class DartClient:
                 time.sleep(1.2 * (attempt + 1))
         raise DartError(f"DART 서버 통신 실패: {last}")
 
-    def _json(self, endpoint, params, ttl):
+    def _json(self, endpoint, params, ttl, empty_ttl=None):
+        """empty_ttl: '조회된 데이터 없음(013)' 응답의 재사용 시간(초). 지정하면 ttl 대신 이 값을 적용."""
         ck = endpoint + "?" + "&".join(f"{k}={params[k]}" for k in sorted(params))
         raw = self.store.cache_get(ck, ttl) if self.store else None
+        if raw is not None and empty_ttl is not None and len(raw) < 400 \
+                and json.loads(raw.decode("utf-8")).get("status") == "013":
+            raw = self.store.cache_get(ck, empty_ttl)      # 오래된 '데이터 없음'은 다시 조회
         if raw is None:
             raw = self._http(endpoint, params)
             try:
@@ -234,11 +240,64 @@ class DartClient:
         return self._list(corp_code, bgn, end, "B", 3600)
 
     # 재무제표 ----------------------------------------------------------------
-    def statement(self, corp_code, bsns_year, reprt_code, fs_div, rcept_no=None):
+    def api_statement(self, corp_code, bsns_year, reprt_code, fs_div):
+        """OpenDART 재무정보(단일회사 전체 재무제표). 없으면 None.
+        공시 직후엔 아직 반영 전일 수 있어 '없음' 응답은 1시간만 재사용."""
         d = self._json("fnlttSinglAcntAll.json", {
             "corp_code": corp_code, "bsns_year": bsns_year,
-            "reprt_code": reprt_code, "fs_div": fs_div}, DAY)
-        return d.get("list") if d.get("status") == "000" else None
+            "reprt_code": reprt_code, "fs_div": fs_div}, DAY, empty_ttl=3600)
+        return (d.get("list") or None) if d.get("status") == "000" else None
+
+    def statement(self, corp_code, bsns_year, reprt_code, fs_div, rcept_no=None):
+        """재무정보 API 우선. API에 해당 보고서 수치가 없으면 공시원문(document.xml)에서 직접 추출.
+          - API에 연결·별도 모두 없음 → 원문에서 추출(공시는 됐지만 재무정보 API 반영 전인 경우)
+          - API에 별도만 있고 연결 없음 → 원문에 연결재무제표가 실제로 있을 때만 원문의 연결 수치 사용
+          - API에 연결만 있고 별도 없음 → 연결을 쓰므로 원문 불필요
+        원문에서도 손익계산서를 못 찾으면 DocParseError(엔진이 같은 기간 다른 접수본으로 재시도)."""
+        rows = self.api_statement(corp_code, bsns_year, reprt_code, fs_div)
+        if rows or not rcept_no:
+            return rows
+        other = self.api_statement(corp_code, bsns_year, reprt_code, "OFS" if fs_div == "CFS" else "CFS")
+        if other:
+            if fs_div == "OFS" or not self.doc_has_consolidated(rcept_no):
+                return None
+            return self.doc_statements(rcept_no)["CFS"] or None
+        doc = self.doc_statements(rcept_no)
+        if not doc["CFS"] and not doc["OFS"]:
+            raise DocParseError(
+                f"OpenDART 재무정보 API에 {bsns_year}년 {REPRT_KO.get(reprt_code, reprt_code)} 수치가 없고, "
+                f"공시원문(접수번호 {rcept_no})에서도 손익계산서를 찾지 못함")
+        return doc[fs_div] or None
+
+    def document_zip(self, rcept_no):
+        """공시원문 원본(zip). 같은 보고서를 연결 여부 확인·수치 추출에 함께 쓰도록 메모리에 잠시 보관."""
+        with self._doc_lock:
+            if rcept_no in self._doc_raw:
+                return self._doc_raw[rcept_no]
+        body = self._http("document.xml", {"rcept_no": rcept_no})
+        if not body.startswith(b"PK"):
+            try:
+                msg = json.loads(body.decode("utf-8")).get("message")
+            except ValueError:
+                msg = body[:120].decode("utf-8", "replace")
+            raise DocParseError(f"공시원문(document.xml, 접수번호 {rcept_no}) 수신 실패: {msg}")
+        with self._doc_lock:
+            self._doc_raw[rcept_no] = body
+            while len(self._doc_raw) > 6:
+                self._doc_raw.pop(next(iter(self._doc_raw)))
+        return body
+
+    def doc_statements(self, rcept_no):
+        """공시원문에서 연결/별도 손익계산서 추출 → {"CFS": rows, "OFS": rows, "cfs_present": bool}. 성공 결과는 영구 캐시."""
+        ck = "doc_statements:v1:" + rcept_no
+        raw = self.store.cache_get(ck, None) if self.store else None
+        if raw is not None:
+            return json.loads(raw)
+        from dart_web import parse_document_zip     # 순환 import 방지(dart_web → dart)
+        res = parse_document_zip(self.document_zip(rcept_no), rcept_no)
+        if (res["CFS"] or res["OFS"]) and self.store:
+            self.store.cache_put(ck, json.dumps(res, ensure_ascii=False).encode())
+        return res
 
     # 공시원문 확인 -----------------------------------------------------------
     _CONS = re.compile(r"연결\s*(재무상태표|손익계산서|포괄손익계산서)")
@@ -249,9 +308,10 @@ class DartClient:
         raw = self.store.cache_get(ck, None)
         if raw is not None:
             return json.loads(raw)["has"]
-        body = self._http("document.xml", {"rcept_no": rcept_no})
-        if not body.startswith(b"PK"):
-            raise DartError("공시원문 수신 실패")
+        try:
+            body = self.document_zip(rcept_no)
+        except DocParseError as ex:
+            raise DartError(str(ex))
         has = False
         with zipfile.ZipFile(io.BytesIO(body)) as z:
             for name in z.namelist():

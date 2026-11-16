@@ -1,5 +1,16 @@
 # HANDOFF — DART 재무실적 조회 에이전트 v5.1 (4개 분기 합산 구간 고정 + 정정공시 접수본 선택 + 한국시간)
 
+## 0-1. v5.2 추가 수정 (2026-11-16) — API 모드 원문 폴백
+- 배경: 배포본은 `DATA_SOURCE=api`. 한화에어로스페이스 2026 3분기보고서(20261112000647, 11/12 공시)가 DART엔 있으나 재무정보 API가 수치를 주지 않아 '작년 4Q~금년 3Q' 산출 불가(사용자 보고). 실제 API 응답은 미확인(작업공간에서 OpenDART 접속 불가).
+- `dart.py` `DartClient`
+  - `api_statement(corp_code, bsns_year, reprt_code, fs_div) -> list|None` : 기존 재무정보 API 호출. `_json(..., empty_ttl=3600)`으로 '013 데이터 없음'은 1시간만 재사용.
+  - `statement(..., rcept_no)` : API 우선 → API에 연결·별도 모두 없으면 `doc_statements(rcept_no)[fs]` / API에 별도만 있으면 `doc_has_consolidated()`가 참일 때만 원문 CFS / 원문에서도 못 찾으면 `DocParseError`(엔진이 같은 기간 다른 접수본으로 재시도).
+  - `document_zip(rcept_no)` : document.xml 원본을 최근 6건 메모리 보관(연결 여부 확인과 추출이 같은 원본 공유). `doc_statements(rcept_no)` : 추출 결과 영구 캐시(`doc_statements:v1:` 키, 성공 시만).
+- `dart_web.py` : `decode_xml`, `dart_xml_to_html`(TE/TU→TD, TITLE→P, SECTION-n→DIV, &cr;), `xml_toc`(TITLE ATOC="Y" 기준 구간), `parse_document_xml`, `parse_document_zip`(본문 XML 우선, 없으면 첨부). 표 해석은 기존 `pick_statement_nodes`·`extract_statements` 재사용, 행에 `origin: "document"`.
+- `engine.py` : 기준 판정 근거에 "공시원문에서 연결 손익계산서 직접 추출", `origin_notes()`로 구간 주석·FY 메시지에 원문 추출 내역 기록.
+- 테스트: `tests/test_api_document_fallback.py`(7개, 실제 DartClient + 가짜 `_http`), 픽스처 `tests/fixture_dart_xml.py`(요약재무정보·주석 부문손익 함정 포함).
+- ⚠️ 픽스처는 DART XML 형식을 본뜬 것. **실제 document.xml로 한화에어로스페이스 2026 3Q 추출값을 공시 화면과 대조 확인 필요** (연결 포괄손익계산서 3개월 매출액·영업이익·지배기업 귀속 순이익).
+
 ## 0. v5.1 추가 수정 (2026-11-16)
 ### (1) 검색 시점·검색일을 한국시간으로
 - 원인: `datetime.now()`·`date.today()`가 서버 시스템 시간대를 사용 → 해외 리전(UTC) 배포 시 9시간 늦게 표기, 자정~09시엔 '검색일'도 하루 전.
@@ -26,7 +37,7 @@
 - 순수 Python 표준 라이브러리 HTTP 서버(`server.py`) + 단일 HTML(`static/index.html`) + 자체 xlsx 작성기(`xlsx.py`).
 - 데이터 소스: `DATA_SOURCE=web`(기본, DART 공시원문 스크래핑 `dart_web.py`) / `api`(OpenDART, `dart.py`).
 - 실행: `python server.py` (포트 `PORT`, 기본 8000). API 키는 `DART_API_KEY` 환경변수 또는 `.env`.
-- 테스트: `python -m unittest discover -s tests` → **현재 49개 전부 통과** (ResourceWarning은 기존 test_web의 SQLite 미종료로, 무해).
+- 테스트: `python -m unittest discover -s tests` → **현재 56개 전부 통과** (ResourceWarning은 기존 test_web의 SQLite 미종료로, 무해).
 
 ## 2. 이번 작업(v4 → v5)의 요구사항
 **문제:** 조회기간 `최근 4개 분기`가 회사별 *최신 공시 보고서*(`max(self.reports)`) 기준이어서,

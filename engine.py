@@ -350,8 +350,11 @@ class CompanyRun:
         k = (rep.bsns, rep.q)
         if k in self._basis:
             return self._basis[k]
-        if self.stmt(rep, "CFS"):
-            r = {"fs": "CFS", "evidence": "연결재무제표 조회됨(OpenDART CFS)", "message": None}
+        cfs = self.stmt(rep, "CFS")
+        if cfs:
+            ev = ("OpenDART 재무정보 API 미제공 → 공시원문에서 연결 손익계산서 직접 추출"
+                  if cfs[0].get("origin") == "document" else "연결재무제표 조회됨(OpenDART CFS)")
+            r = {"fs": "CFS", "evidence": ev, "message": None}
         elif not self.stmt(rep, "OFS"):
             r = {"fs": None, "evidence": None,
                  "message": "연결·별도 재무제표를 모두 읽지 못함 — 공시원문 확인 필요"
@@ -564,12 +567,24 @@ class CompanyRun:
                     r = self._fail("unverified", f"{ITEM_KO[item]} 계정을 찾지 못함 — 원문 확인 필요")
                 else:
                     r = self._ok(f["cur"], "direct", [self._src(rep, b["fs"], f, "연간", f["cur"])],
-                                 note=(self.replacement_notes([rep]) or [None])[0])
+                                 note=" ".join(self.replacement_notes([rep]) + self.origin_notes([rep])) or None)
                     if item == "net_income":
                         label, fb, why = self.ni_info(b["fs"], f.get("tier"))
                         r.update(ni_basis=label, fallback=fb, fallback_reason=why, tier=f.get("tier"))
             res[item] = r
         return {"rep": rep, "basis": b}, res
+
+    def origin_notes(self, reps=None):
+        """재무정보 API에 수치가 없어 공시원문에서 직접 추출한 보고서 내역."""
+        reps = reps if reps is not None else sorted(self.reports.values(), key=lambda r: (r.bsns, r.q))
+        out = []
+        for r in reps:
+            for fs in ("CFS", "OFS"):
+                rows = self._stmt.get((r.bsns, r.q, fs))
+                if rows and rows[0].get("origin") == "document":
+                    out.append(f"{qlabel(r.bsns, r.q)}({BASIS_KO[fs]}): OpenDART 재무정보 API에 수치가 없어 "
+                               f"공시원문 {r.report_nm}(접수번호 {r.rcept_no})의 손익계산서에서 직접 추출함.")
+        return out
 
     def replacement_notes(self, reps=None):
         """원래 고른 접수본을 읽지 못해 같은 기간의 다른 접수본으로 대체한 내역."""
@@ -658,7 +673,8 @@ class CompanyRun:
         ttm = self.compute_ttm(qs, code)
         ch = self.basis_changes(qs)
         w.update(period_label=ttm["revenue"]["period_label"], quarters=qs, ttm=ttm, basis_changes=ch,
-                 notes=self.basis_notes(qs, ch) + self.ni_fallback_notes(qs) + self.replacement_notes())
+                 notes=self.basis_notes(qs, ch) + self.ni_fallback_notes(qs) + self.replacement_notes()
+                 + self.origin_notes())
         return w
 
     def run(self, periods, base_year=None):
