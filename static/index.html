@@ -30,7 +30,7 @@ h2{font-size:17px;margin:0 0 4px}
 .hint{color:var(--muted);font-size:13px;margin:0 0 14px}
 .panel{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:18px 20px;margin-bottom:18px}
 button,select,input{font:inherit;color:inherit}
-button{cursor:pointer;border:1px solid var(--line);background:var(--surface);border-radius:5px;padding:7px 14px}
+button{cursor:pointer;border:1px solid var(--line);background:var(--surface);border-radius:5px;padding:7px 14px;white-space:nowrap}
 button:hover{border-color:var(--accent)}
 button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:600;padding:10px 26px}
 button:disabled{opacity:.5;cursor:not-allowed}
@@ -52,6 +52,12 @@ table{width:100%;border-collapse:collapse}
 th,td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
 th{font-weight:600;font-size:13px;color:var(--muted);background:transparent}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+/* 종목명: 10글자까지는 한 줄, 그보다 길면 10.5em 폭에서 줄바꿈 (짧은 이름은 열을 불필요하게 넓히지 않음) */
+.corpname{display:inline-block;width:max-content;max-width:10.5em;font-weight:700;vertical-align:top}
+#restable th,.cond thead th{white-space:nowrap}
+td.act{white-space:nowrap;width:1%}
+td.num .per{white-space:nowrap}
+#restable th,#restable td{padding:9px 8px}   /* '2025년 4Q~2026년 3Q' 기간 표기가 중간에서 끊기지 않게 */
 .tablewrap{overflow-x:auto}
 .cond td select{width:100%;min-width:132px}
 .cond th select{width:100%;min-width:132px;font-size:13px}
@@ -62,7 +68,7 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .val.neg{color:var(--err)}
 .per{font-size:12px;color:var(--muted)}
 .errcell{color:var(--err);font-weight:600}
-.errcell small{display:block;font-weight:400;color:var(--muted);font-size:12px;max-width:230px;overflow-wrap:anywhere;margin-left:auto}
+.errcell small{display:block;font-weight:400;color:var(--muted);font-size:12px;max-width:230px;overflow-wrap:anywhere;word-break:keep-all;margin-left:auto}
 .banner{background:var(--warn-bg);color:var(--warn);padding:10px 14px;border-radius:6px;margin-bottom:16px;font-size:14px}
 .banner input{width:340px;max-width:100%;margin:0 6px}
 .err-banner{background:var(--err-bg);color:var(--err);padding:10px 14px;border-radius:6px;margin-bottom:12px;font-size:14px}
@@ -250,10 +256,10 @@ function renderCond(){
   const has=state.selected.length>0;
   $("#bulkrow").hidden=!has;$("#run").disabled=!has;
   $("#condbody").innerHTML=has?state.selected.map((s,i)=>`<tr>
-    <td><strong>${esc(s.corp_name)}</strong> <span class="tag ${s.market==="KOSPI"?"kospi":"kosdaq"}">${s.market}</span></td>
+    <td><span class="corpname">${esc(s.corp_name)}</span> <span class="tag ${s.market==="KOSPI"?"kospi":"kosdaq"}">${s.market}</span></td>
     <td style="font-variant-numeric:tabular-nums">${esc(s.stock_code)}</td>
     ${ITEMS.map(([k,l])=>`<td>${sel(PERIOD,s.periods[k],`data-i="${i}" data-k="${k}" aria-label="${esc(s.corp_name)} ${l}"`)}</td>`).join("")}
-    <td><button data-del="${i}" aria-label="${esc(s.corp_name)} 삭제">삭제</button></td></tr>`).join("")
+    <td class="act"><button data-del="${i}" aria-label="${esc(s.corp_name)} 삭제">삭제</button></td></tr>`).join("")
     :`<tr><td colspan="6" class="empty">위에서 종목을 검색해 추가하세요.</td></tr>`;
   document.querySelectorAll("#condbody select").forEach(el=>el.onchange=()=>{state.selected[+el.dataset.i].periods[el.dataset.k]=el.value});
   document.querySelectorAll("[data-del]").forEach(b=>b.onclick=()=>{state.selected.splice(+b.dataset.del,1);renderCond()});
@@ -322,14 +328,14 @@ function renderResults(){
   const d=state.data;
   $("#resmeta").textContent=`검색 시점 ${d.searched_at.replace("T"," ")} (한국시간) · 기준연도(금년) ${d.base_year??""}년 · 단위 ${d.unit} · 조회 실패 항목은 0이 아니라 오류 상태로 표시됩니다.`;
   $("#resbody").innerHTML=d.results.map((r,i)=>{
-    if(r.error)return `<tr><td><strong>${esc(r.corp_name)}</strong></td><td>${esc(r.stock_code)}</td><td colspan="5" class="errcell">조회 실패<small style="max-width:none">${esc(r.error)}</small></td></tr>`;
+    if(r.error)return `<tr><td><span class="corpname">${esc(r.corp_name)}</span></td><td>${esc(r.stock_code)}</td><td colspan="5" class="errcell">조회 실패<small style="max-width:none">${esc(r.error)}</small></td></tr>`;
     const bd=r.basis_display?basisTag(r.basis_display):"";
     const mix=r.mixed_flag?' <span class="tag warn">혼합기간 포함</span>':"";
-    return `<tr><td><strong>${esc(r.corp_name)}</strong><div class="per">${esc(r.market||"")}</div></td>
+    return `<tr><td><span class="corpname">${esc(r.corp_name)}</span><div class="per">${esc(r.market||"")}</div></td>
       <td style="font-variant-numeric:tabular-nums">${esc(r.stock_code)}</td>
       <td>${bd}${mix}${r.has_ttm&&r.basis_changes.length?'<div class="per">연결·개별 변경 있음</div>':""}</td>
       ${ITEMS.map(([k])=>`<td class="num">${cell(r.items[k])}</td>`).join("")}
-      <td>${(r.windows||[]).length||r.has_ttm?`<button data-detail="${i}">상세조회</button>`:'<span class="per">연간만 조회</span>'}</td></tr>`;
+      <td class="act">${(r.windows||[]).length||r.has_ttm?`<button data-detail="${i}">상세조회</button>`:'<span class="per">연간만 조회</span>'}</td></tr>`;
   }).join("");
   document.querySelectorAll("[data-detail]").forEach(b=>b.onclick=()=>{renderDetail(+b.dataset.detail);show("s3")});
   const anyMix=d.results.some(r=>r.mixed_flag);
